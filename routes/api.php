@@ -30,5 +30,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/projects/{project}/generate-environments', [ProjectController::class, 'generateEnvironments']);
     Route::post('/projects/{project}/generate-shots', [ProjectController::class, 'generateShots']);
     Route::post('/projects/{project}/characters/{character}/generate-image', [ProjectController::class, 'generateCharacterImage']);
+    Route::post('/projects/{project}/environments/{environment}/generate-image', [ProjectController::class, 'generateEnvironmentImage']);
     Route::post('/projects/{project}/shots/{shot}/generate-image', [ProjectController::class, 'generateShotImage']);
 });

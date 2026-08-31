@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Exceptions\GenerationFailedException;
 use App\Models\Character;
 use App\Models\CharacterAsset;
+use App\Models\Environment;
+use App\Models\EnvironmentAsset;
 use App\Models\Project;
 use App\Models\Shot;
 use App\Models\ShotImage;
@@ -71,6 +73,61 @@ class ProjectImageGenerator
     }
 
     /**
+     * @return array{skipped: bool, environment: Environment, asset: EnvironmentAsset|null}
+     */
+    public function generateEnvironmentStill(Project $project, Environment $environment, bool $force = false): array
+    {
+        $environment->loadMissing('assets');
+        $existing = $this->primaryEnvironmentAsset($environment);
+        if ($existing && filled($existing->image_url) && ! $force) {
+            return [
+                'skipped' => true,
+                'environment' => $environment,
+                'asset' => $existing,
+            ];
+        }
+
+        $prompt = $this->environmentPrompt($environment, $project->style);
+
+        try {
+            $image = $this->gemini->generateImage($prompt, [], '16:9');
+        } catch (GenerationFailedException $e) {
+            $environment->image_status = 'failed';
+            $environment->save();
+            throw $e;
+        }
+
+        $url = $this->store->put(
+            $project->id,
+            'environments',
+            (string) $environment->id,
+            $image['binary'],
+            $image['mime'],
+        );
+
+        $asset = $existing ?? $environment->assets()->make([
+            'asset_type' => 'location',
+            'title' => $environment->name,
+            'is_primary' => true,
+        ]);
+        $asset->image_url = $url;
+        $asset->status = 'completed';
+        $asset->is_primary = true;
+        $asset->save();
+
+        $environment->image_status = 'completed';
+        $environment->prompt = $prompt;
+        $environment->save();
+        $environment->setRelation('assets', $environment->assets()->get());
+
+        return [
+            'skipped' => false,
+            'environment' => $environment,
+            'asset' => $asset,
+        ];
+    }
+
+    /**
      * @return array{skipped: bool, shot: Shot, image: ShotImage|null}
      */
     public function generateShotStill(
@@ -79,7 +136,7 @@ class ProjectImageGenerator
         bool $force = false,
         ?string $customPrompt = null,
     ): array {
-        $shot->loadMissing(['scene', 'environment', 'images']);
+        $shot->loadMissing(['scene.environment.assets', 'environment.assets', 'images']);
         $existing = $this->latestShotImage($shot);
         $adjustment = is_string($customPrompt) ? trim($customPrompt) : '';
         $shouldForce = $force || $adjustment !== '';
@@ -94,7 +151,17 @@ class ProjectImageGenerator
 
         $characters = $project->characters()->with('assets')->orderBy('order_index')->get();
         $prompt = $this->shotPrompt($shot, $characters, $project->style);
-        $references = $this->characterReferences($characters, $shot);
+        $previous = $this->previousCompletedShot($shot);
+        $previousImage = $previous ? $this->latestShotImage($previous) : null;
+        $previousPrompt = filled($previousImage?->prompt)
+            ? (string) $previousImage->prompt
+            : (string) ($previous?->prompt ?? '');
+
+        if ($previousPrompt !== '') {
+            $prompt = $this->continuityPreamble($previousPrompt)."\n\n".$prompt;
+        }
+
+        $references = $this->shotReferences($project, $shot, $characters, $previousImage);
 
         if ($adjustment !== '') {
             $prompt .= "\n\nEdit the attached existing still. Apply this adjustment:\n".$adjustment;
@@ -156,6 +223,115 @@ class ProjectImageGenerator
         ) ?? $assets->first(fn (CharacterAsset $asset) => filled($asset->image_url));
     }
 
+    private function primaryEnvironmentAsset(?Environment $environment): ?EnvironmentAsset
+    {
+        if (! $environment) {
+            return null;
+        }
+
+        $assets = $environment->relationLoaded('assets')
+            ? $environment->assets
+            : $environment->assets()->get();
+
+        return $assets->first(
+            fn (EnvironmentAsset $asset) => $asset->is_primary && filled($asset->image_url)
+        ) ?? $assets->first(fn (EnvironmentAsset $asset) => filled($asset->image_url));
+    }
+
+    private function previousCompletedShot(Shot $shot): ?Shot
+    {
+        if ($shot->scene_id == null) {
+            return null;
+        }
+
+        $previous = Shot::query()
+            ->where('project_id', $shot->project_id)
+            ->where('scene_id', $shot->scene_id)
+            ->where('id', '!=', $shot->id)
+            ->where(function ($query) use ($shot) {
+                $query->where('order_index', '<', (int) $shot->order_index)
+                    ->orWhere(function ($sameOrder) use ($shot) {
+                        $sameOrder->where('order_index', (int) $shot->order_index)
+                            ->where('id', '<', $shot->id);
+                    });
+            })
+            ->orderByDesc('order_index')
+            ->orderByDesc('id')
+            ->with('images')
+            ->get()
+            ->first(fn (Shot $candidate) => $this->latestShotImage($candidate) !== null);
+
+        return $previous;
+    }
+
+    private function continuityPreamble(string $previousPrompt): string
+    {
+        return implode("\n", [
+            'CONTINUITY — previous still in this scene. Keep the same people, wardrobe, and location unless this shot clearly changes them.',
+            'Previous prompt:',
+            $previousPrompt,
+            'Attached images may include: the previous still, a location plate, and character portraits.',
+        ]);
+    }
+
+    /**
+     * @param  Collection<int, Character>  $characters
+     * @return list<array{binary: string, mime: string}>
+     */
+    private function shotReferences(
+        Project $project,
+        Shot $shot,
+        Collection $characters,
+        ?ShotImage $previousImage,
+    ): array {
+        $references = [];
+
+        $previousFile = $this->store->readPublicUrl($previousImage?->image_url);
+        if ($previousFile !== null) {
+            $references[] = $previousFile;
+        }
+
+        $environment = $this->resolveEnvironment($shot, $project);
+        $environmentFile = $this->store->readPublicUrl($this->primaryEnvironmentAsset($environment)?->image_url);
+        if ($environmentFile !== null) {
+            $references[] = $environmentFile;
+        }
+
+        $remaining = 3 - count($references);
+        if ($remaining > 0) {
+            $references = array_merge(
+                $references,
+                $this->characterReferences($characters, $shot, $remaining),
+            );
+        }
+
+        return array_slice($references, 0, 3);
+    }
+
+    private function resolveEnvironment(Shot $shot, Project $project): ?Environment
+    {
+        $shot->loadMissing(['environment.assets', 'scene.environment.assets']);
+
+        if ($shot->environment) {
+            return $shot->environment;
+        }
+
+        if ($shot->scene?->environment) {
+            return $shot->scene->environment;
+        }
+
+        $place = strtolower(trim((string) ($shot->scene?->location ?? '')));
+        if ($place === '') {
+            return null;
+        }
+
+        return $project->environments()->with('assets')->get()->first(function (Environment $environment) use ($place) {
+            $name = strtolower(trim((string) $environment->name));
+
+            return $name !== '' && (str_contains($name, $place) || str_contains($place, $name));
+        });
+    }
+
     private function latestShotImage(Shot $shot): ?ShotImage
     {
         $images = $shot->relationLoaded('images')
@@ -198,7 +374,7 @@ class ProjectImageGenerator
      * @param  Collection<int, Character>  $characters
      * @return list<array{binary: string, mime: string}>
      */
-    private function characterReferences(Collection $characters, Shot $shot): array
+    private function characterReferences(Collection $characters, Shot $shot, int $limit = 3): array
     {
         $haystack = strtolower(implode(' ', array_filter([
             $shot->title,
@@ -219,7 +395,7 @@ class ProjectImageGenerator
         $references = [];
 
         foreach ($ranked as $character) {
-            if (count($references) >= 3) {
+            if (count($references) >= $limit) {
                 break;
             }
 
@@ -231,6 +407,36 @@ class ProjectImageGenerator
         }
 
         return $references;
+    }
+
+    private function environmentPrompt(Environment $environment, ?string $style): string
+    {
+        $lines = [
+            'Create a single cinematic location still for a fictional film.',
+            'Empty of people. Show the space, architecture, and lighting only.',
+            'No text, no watermark, no collage, no split frames.',
+            '',
+            'Location: '.$environment->name,
+        ];
+
+        foreach ([
+            'Type' => $environment->type,
+            'Time of day' => $environment->time_of_day,
+            'Appearance' => $environment->appearance,
+            'Lighting' => $environment->lighting,
+            'Mood' => $environment->mood,
+            'Description' => $environment->description,
+        ] as $label => $value) {
+            if (filled($value)) {
+                $lines[] = $label.': '.$value;
+            }
+        }
+
+        if (filled($style)) {
+            $lines[] = 'Visual style: '.$style;
+        }
+
+        return implode("\n", $lines);
     }
 
     private function characterPrompt(Character $character, ?string $style): string
@@ -315,6 +521,9 @@ class ProjectImageGenerator
         if (filled($style)) {
             $lines[] = 'Visual style: '.$style;
         }
+
+        $lines[] = '';
+        $lines[] = 'If a previous still or location plate is attached, match those faces, wardrobe, and architecture.';
 
         return implode("\n", $lines);
     }

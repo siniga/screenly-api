@@ -16,6 +16,7 @@ use App\Http\Requests\UpdateProjectRequest;
 use App\Models\Character;
 use App\Models\CharacterAsset;
 use App\Models\Environment;
+use App\Models\EnvironmentAsset;
 use App\Models\Episode;
 use App\Models\Project;
 use App\Models\Scene;
@@ -71,6 +72,7 @@ class ProjectController extends Controller
             'characters' => fn ($query) => $query->orderBy('order_index'),
             'characters.assets',
             'environments' => fn ($query) => $query->orderBy('order_index'),
+            'environments.assets',
             'shots' => fn ($query) => $query->orderBy('order_index'),
             'shots.scene',
             'shots.images',
@@ -750,6 +752,33 @@ class ProjectController extends Controller
         ]);
     }
 
+    public function generateEnvironmentImage(
+        Request $request,
+        Project $project,
+        Environment $environment,
+        ProjectImageGenerator $images,
+    ): JsonResponse {
+        $this->authorizeProject($request, $project);
+        abort_unless($environment->project_id === $project->id, 404);
+        set_time_limit(180);
+
+        $force = $request->boolean('force');
+        $environment->load('assets');
+
+        try {
+            $result = $images->generateEnvironmentStill($project, $environment, $force);
+        } catch (GenerationFailedException $e) {
+            return $this->generationFailed($e, $project);
+        }
+
+        return response()->json([
+            'success' => true,
+            'skipped' => $result['skipped'],
+            'environment' => $this->serializeEnvironment($result['environment']),
+            'asset' => $result['asset'] ? $this->serializeEnvironmentAsset($result['asset']) : null,
+        ]);
+    }
+
     public function generateShotImage(
         Request $request,
         Project $project,
@@ -763,7 +792,7 @@ class ProjectController extends Controller
         $customPrompt = $request->input('custom_prompt') ?? $request->input('prompt');
         $customPrompt = is_string($customPrompt) ? trim($customPrompt) : null;
         $force = $request->boolean('force') || filled($customPrompt);
-        $shot->load(['scene', 'images']);
+        $shot->load(['scene.environment.assets', 'environment.assets', 'images']);
 
         try {
             $result = $images->generateShotStill($project, $shot, $force, $customPrompt);
@@ -956,13 +985,20 @@ class ProjectController extends Controller
     {
         $environments = $project->relationLoaded('environments')
             ? $project->environments
-            : $project->environments()->orderBy('order_index')->get();
+            : $project->environments()->with('assets')->orderBy('order_index')->get();
 
         return $environments->map(fn (Environment $environment) => $this->serializeEnvironment($environment))->values()->all();
     }
 
     private function serializeEnvironment(Environment $environment): array
     {
+        $assets = $environment->relationLoaded('assets')
+            ? $environment->assets
+            : $environment->assets()->get();
+        $primary = $assets->first(
+            fn (EnvironmentAsset $asset) => $asset->is_primary && filled($asset->image_url)
+        ) ?? $assets->first(fn (EnvironmentAsset $asset) => filled($asset->image_url));
+
         return [
             'id' => $environment->id,
             'order_index' => $environment->order_index,
@@ -975,8 +1011,23 @@ class ProjectController extends Controller
             'mood' => $environment->mood,
             'importance' => $environment->importance,
             'status' => $environment->status,
-            'image_status' => $environment->image_status,
+            'image_url' => $primary?->image_url,
+            'image_status' => filled($primary?->image_url) ? 'completed' : $environment->image_status,
             'prompt' => $environment->prompt,
+            'assets' => $assets->map(fn (EnvironmentAsset $asset) => $this->serializeEnvironmentAsset($asset))->values()->all(),
+        ];
+    }
+
+    private function serializeEnvironmentAsset(EnvironmentAsset $asset): array
+    {
+        return [
+            'id' => $asset->id,
+            'asset_type' => $asset->asset_type,
+            'title' => $asset->title,
+            'image_url' => $asset->image_url,
+            'is_primary' => $asset->is_primary,
+            'status' => $asset->status,
+            'updated_at' => optional($asset->updated_at)?->toIso8601String(),
         ];
     }
 
