@@ -487,74 +487,6 @@ class ProjectGenerationTest extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_generate_environment_image_saves_a_still(): void
-    {
-        Storage::fake('public');
-        Http::fake([
-            'generativelanguage.googleapis.com/*' => Http::response($this->geminiImageResponse()),
-        ]);
-
-        $user = User::factory()->create();
-        $project = $this->projectFor($user);
-        $environment = $project->environments()->create([
-            'order_index' => 0,
-            'name' => 'Quiet kitchen',
-            'type' => 'interior',
-            'time_of_day' => 'Night',
-            'description' => 'A dim apartment kitchen.',
-            'image_status' => 'pending',
-        ]);
-
-        Sanctum::actingAs($user);
-
-        $this->postJson("/api/projects/{$project->id}/environments/{$environment->id}/generate-image")
-            ->assertOk()
-            ->assertJsonPath('success', true)
-            ->assertJsonPath('skipped', false)
-            ->assertJsonPath('environment.image_status', 'completed');
-
-        $environment->refresh();
-        $this->assertSame('completed', $environment->image_status);
-        $this->assertDatabaseHas('environment_assets', [
-            'environment_id' => $environment->id,
-            'asset_type' => 'location',
-            'status' => 'completed',
-        ]);
-        $this->assertTrue(
-            Storage::disk('public')->exists("projects/{$project->id}/environments/{$environment->id}.png")
-        );
-    }
-
-    public function test_generate_environment_image_skips_when_a_still_already_exists(): void
-    {
-        Storage::fake('public');
-        Http::fake();
-
-        $user = User::factory()->create();
-        $project = $this->projectFor($user);
-        $environment = $project->environments()->create([
-            'order_index' => 0,
-            'name' => 'Quiet kitchen',
-            'image_status' => 'completed',
-        ]);
-        $environment->assets()->create([
-            'asset_type' => 'location',
-            'title' => 'Quiet kitchen',
-            'image_url' => '/storage/projects/1/environments/1.png',
-            'is_primary' => true,
-            'status' => 'completed',
-        ]);
-
-        Sanctum::actingAs($user);
-
-        $this->postJson("/api/projects/{$project->id}/environments/{$environment->id}/generate-image")
-            ->assertOk()
-            ->assertJsonPath('success', true)
-            ->assertJsonPath('skipped', true);
-
-        Http::assertNothingSent();
-    }
-
     public function test_generate_shot_image_saves_a_still(): void
     {
         Storage::fake('public');
@@ -736,7 +668,46 @@ class ProjectGenerationTest extends TestCase
         Http::assertSentCount(1);
     }
 
-    public function test_generate_shot_image_includes_the_previous_shot_prompt(): void
+    public function test_generate_environment_image_saves_a_plate(): void
+    {
+        Storage::fake('public');
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($this->geminiImageResponse()),
+        ]);
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user, ['current_step' => 'environments']);
+        $environment = $project->environments()->create([
+            'order_index' => 0,
+            'name' => 'Kitchen',
+            'type' => 'interior',
+            'time_of_day' => 'NIGHT',
+            'description' => 'A quiet kitchen.',
+            'image_status' => 'pending',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/environments/{$environment->id}/generate-image")
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('skipped', false)
+            ->assertJsonPath('environment.image_status', 'completed')
+            ->assertJsonPath('environment.name', 'Kitchen');
+
+        $environment->refresh();
+        $this->assertSame('completed', $environment->image_status);
+        $this->assertDatabaseHas('environment_assets', [
+            'environment_id' => $environment->id,
+            'asset_type' => 'plate',
+            'status' => 'completed',
+        ]);
+        $this->assertTrue(
+            Storage::disk('public')->exists("projects/{$project->id}/environments/{$environment->id}.png")
+        );
+    }
+
+    public function test_generate_shot_image_uses_identity_only_portraits_not_previous_stills(): void
     {
         Storage::fake('public');
         Http::fake([
@@ -745,6 +716,38 @@ class ProjectGenerationTest extends TestCase
 
         $user = User::factory()->create();
         $project = $this->projectFor($user, ['current_step' => 'storyboard']);
+        $character = $project->characters()->create([
+            'order_index' => 0,
+            'name' => 'Chloe',
+            'appearance' => 'Dark hair and a silver necklace',
+            'wardrobe' => 'Grey coat',
+            'image_status' => 'completed',
+        ]);
+        $portraitPath = "projects/{$project->id}/characters/{$character->id}.png";
+        Storage::disk('public')->put($portraitPath, 'portrait-bytes');
+        $character->assets()->create([
+            'asset_type' => 'portrait',
+            'title' => 'Chloe',
+            'image_url' => '/storage/'.$portraitPath,
+            'is_primary' => true,
+            'status' => 'completed',
+        ]);
+
+        $environment = $project->environments()->create([
+            'order_index' => 0,
+            'name' => 'Kitchen',
+            'image_status' => 'completed',
+        ]);
+        $platePath = "projects/{$project->id}/environments/{$environment->id}.png";
+        Storage::disk('public')->put($platePath, 'environment-plate-bytes');
+        $environment->assets()->create([
+            'asset_type' => 'plate',
+            'title' => 'Kitchen',
+            'image_url' => '/storage/'.$platePath,
+            'is_primary' => true,
+            'status' => 'completed',
+        ]);
+
         $scene = $project->scenes()->create([
             'scene_number' => 1,
             'order_index' => 0,
@@ -752,7 +755,7 @@ class ProjectGenerationTest extends TestCase
             'location' => 'KITCHEN',
             'status' => 'completed',
         ]);
-        $previous = $project->shots()->create([
+        $previousShot = $project->shots()->create([
             'scene_id' => $scene->id,
             'shot_number' => '1',
             'order_index' => 0,
@@ -760,36 +763,48 @@ class ProjectGenerationTest extends TestCase
             'action' => 'He looks at the door.',
             'image_status' => 'completed',
         ]);
-        $previousPath = "projects/{$project->id}/shots/{$previous->id}-v1.png";
-        Storage::disk('public')->put($previousPath, 'previous-bytes');
-        $previous->images()->create([
+        $previousPath = "projects/{$project->id}/shots/{$previousShot->id}-v1.png";
+        Storage::disk('public')->put($previousPath, 'previous-still-bytes');
+        $previousShot->images()->create([
             'version_number' => 1,
             'image_url' => '/storage/'.$previousPath,
-            'prompt' => 'Previous kitchen still of a man waiting by the door.',
             'status' => 'completed',
         ]);
-        $next = $project->shots()->create([
+
+        $shot = $project->shots()->create([
             'scene_id' => $scene->id,
+            'environment_id' => $environment->id,
             'shot_number' => '2',
             'order_index' => 1,
-            'title' => 'The door opens',
-            'action' => 'Someone steps into the kitchen.',
+            'title' => 'Chloe walks outside',
+            'action' => 'Chloe steps onto the street.',
             'image_status' => 'none',
         ]);
 
         Sanctum::actingAs($user);
 
-        $this->postJson("/api/projects/{$project->id}/shots/{$next->id}/generate-image")
+        $this->postJson("/api/projects/{$project->id}/shots/{$shot->id}/generate-image")
             ->assertOk()
             ->assertJsonPath('success', true)
             ->assertJsonPath('skipped', false);
 
         Http::assertSent(function ($request) {
-            $text = (string) data_get($request->data(), 'contents.0.parts.0.text');
+            $parts = data_get($request->data(), 'contents.0.parts', []);
+            $text = collect($parts)->pluck('text')->filter()->implode("\n");
+            $inline = collect($parts)
+                ->map(fn ($part) => data_get($part, 'inlineData.data') ?? data_get($part, 'inline_data.data'))
+                ->filter()
+                ->values();
 
-            return str_contains($text, 'CONTINUITY')
-                && str_contains($text, 'Previous kitchen still of a man waiting by the door.')
-                && str_contains($text, 'The door opens');
+            $this->assertStringContainsString('identity references only', $text);
+            $this->assertStringContainsString('Do not copy a previous storyboard location', $text);
+            $this->assertStringNotContainsString('previous still', strtolower($text));
+            $this->assertStringNotContainsString('location plate', strtolower($text));
+            $this->assertTrue($inline->contains(base64_encode('portrait-bytes')));
+            $this->assertFalse($inline->contains(base64_encode('previous-still-bytes')));
+            $this->assertFalse($inline->contains(base64_encode('environment-plate-bytes')));
+
+            return true;
         });
     }
 

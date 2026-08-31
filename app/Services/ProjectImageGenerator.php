@@ -106,7 +106,7 @@ class ProjectImageGenerator
         );
 
         $asset = $existing ?? $environment->assets()->make([
-            'asset_type' => 'location',
+            'asset_type' => 'plate',
             'title' => $environment->name,
             'is_primary' => true,
         ]);
@@ -116,7 +116,6 @@ class ProjectImageGenerator
         $asset->save();
 
         $environment->image_status = 'completed';
-        $environment->prompt = $prompt;
         $environment->save();
         $environment->setRelation('assets', $environment->assets()->get());
 
@@ -136,7 +135,7 @@ class ProjectImageGenerator
         bool $force = false,
         ?string $customPrompt = null,
     ): array {
-        $shot->loadMissing(['scene.environment.assets', 'environment.assets', 'images']);
+        $shot->loadMissing(['scene', 'environment', 'images']);
         $existing = $this->latestShotImage($shot);
         $adjustment = is_string($customPrompt) ? trim($customPrompt) : '';
         $shouldForce = $force || $adjustment !== '';
@@ -151,20 +150,14 @@ class ProjectImageGenerator
 
         $characters = $project->characters()->with('assets')->orderBy('order_index')->get();
         $prompt = $this->shotPrompt($shot, $characters, $project->style);
-        $previous = $this->previousCompletedShot($shot);
-        $previousImage = $previous ? $this->latestShotImage($previous) : null;
-        $previousPrompt = filled($previousImage?->prompt)
-            ? (string) $previousImage->prompt
-            : (string) ($previous?->prompt ?? '');
-
-        if ($previousPrompt !== '') {
-            $prompt = $this->continuityPreamble($previousPrompt)."\n\n".$prompt;
-        }
-
-        $references = $this->shotReferences($project, $shot, $characters, $previousImage);
+        $references = $this->characterReferences($characters, $shot);
 
         if ($adjustment !== '') {
-            $prompt .= "\n\nEdit the attached existing still. Apply this adjustment:\n".$adjustment;
+            $prompt .= "\n\nA current still is attached as a starting point for this edit.";
+            $prompt .= "\nKeep identity only: faces, hair, wardrobe, and accessories.";
+            $prompt .= "\nApply this adjustment:\n".$adjustment;
+            $prompt .= "\nIf the adjustment changes action, pose, camera, or location, follow the adjustment.";
+            $prompt .= "\nDo not keep the old room, pose, or action unless the adjustment asks you to.";
             $currentStill = $this->store->readPublicUrl($existing?->image_url);
             if ($currentStill !== null) {
                 array_unshift($references, $currentStill);
@@ -223,12 +216,8 @@ class ProjectImageGenerator
         ) ?? $assets->first(fn (CharacterAsset $asset) => filled($asset->image_url));
     }
 
-    private function primaryEnvironmentAsset(?Environment $environment): ?EnvironmentAsset
+    private function primaryEnvironmentAsset(Environment $environment): ?EnvironmentAsset
     {
-        if (! $environment) {
-            return null;
-        }
-
         $assets = $environment->relationLoaded('assets')
             ? $environment->assets
             : $environment->assets()->get();
@@ -236,100 +225,6 @@ class ProjectImageGenerator
         return $assets->first(
             fn (EnvironmentAsset $asset) => $asset->is_primary && filled($asset->image_url)
         ) ?? $assets->first(fn (EnvironmentAsset $asset) => filled($asset->image_url));
-    }
-
-    private function previousCompletedShot(Shot $shot): ?Shot
-    {
-        if ($shot->scene_id == null) {
-            return null;
-        }
-
-        $previous = Shot::query()
-            ->where('project_id', $shot->project_id)
-            ->where('scene_id', $shot->scene_id)
-            ->where('id', '!=', $shot->id)
-            ->where(function ($query) use ($shot) {
-                $query->where('order_index', '<', (int) $shot->order_index)
-                    ->orWhere(function ($sameOrder) use ($shot) {
-                        $sameOrder->where('order_index', (int) $shot->order_index)
-                            ->where('id', '<', $shot->id);
-                    });
-            })
-            ->orderByDesc('order_index')
-            ->orderByDesc('id')
-            ->with('images')
-            ->get()
-            ->first(fn (Shot $candidate) => $this->latestShotImage($candidate) !== null);
-
-        return $previous;
-    }
-
-    private function continuityPreamble(string $previousPrompt): string
-    {
-        return implode("\n", [
-            'CONTINUITY — previous still in this scene. Keep the same people, wardrobe, and location unless this shot clearly changes them.',
-            'Previous prompt:',
-            $previousPrompt,
-            'Attached images may include: the previous still, a location plate, and character portraits.',
-        ]);
-    }
-
-    /**
-     * @param  Collection<int, Character>  $characters
-     * @return list<array{binary: string, mime: string}>
-     */
-    private function shotReferences(
-        Project $project,
-        Shot $shot,
-        Collection $characters,
-        ?ShotImage $previousImage,
-    ): array {
-        $references = [];
-
-        $previousFile = $this->store->readPublicUrl($previousImage?->image_url);
-        if ($previousFile !== null) {
-            $references[] = $previousFile;
-        }
-
-        $environment = $this->resolveEnvironment($shot, $project);
-        $environmentFile = $this->store->readPublicUrl($this->primaryEnvironmentAsset($environment)?->image_url);
-        if ($environmentFile !== null) {
-            $references[] = $environmentFile;
-        }
-
-        $remaining = 3 - count($references);
-        if ($remaining > 0) {
-            $references = array_merge(
-                $references,
-                $this->characterReferences($characters, $shot, $remaining),
-            );
-        }
-
-        return array_slice($references, 0, 3);
-    }
-
-    private function resolveEnvironment(Shot $shot, Project $project): ?Environment
-    {
-        $shot->loadMissing(['environment.assets', 'scene.environment.assets']);
-
-        if ($shot->environment) {
-            return $shot->environment;
-        }
-
-        if ($shot->scene?->environment) {
-            return $shot->scene->environment;
-        }
-
-        $place = strtolower(trim((string) ($shot->scene?->location ?? '')));
-        if ($place === '') {
-            return null;
-        }
-
-        return $project->environments()->with('assets')->get()->first(function (Environment $environment) use ($place) {
-            $name = strtolower(trim((string) $environment->name));
-
-            return $name !== '' && (str_contains($name, $place) || str_contains($place, $name));
-        });
     }
 
     private function latestShotImage(Shot $shot): ?ShotImage
@@ -374,7 +269,7 @@ class ProjectImageGenerator
      * @param  Collection<int, Character>  $characters
      * @return list<array{binary: string, mime: string}>
      */
-    private function characterReferences(Collection $characters, Shot $shot, int $limit = 3): array
+    private function characterReferences(Collection $characters, Shot $shot): array
     {
         $haystack = strtolower(implode(' ', array_filter([
             $shot->title,
@@ -395,7 +290,7 @@ class ProjectImageGenerator
         $references = [];
 
         foreach ($ranked as $character) {
-            if (count($references) >= $limit) {
+            if (count($references) >= 3) {
                 break;
             }
 
@@ -407,36 +302,6 @@ class ProjectImageGenerator
         }
 
         return $references;
-    }
-
-    private function environmentPrompt(Environment $environment, ?string $style): string
-    {
-        $lines = [
-            'Create a single cinematic location still for a fictional film.',
-            'Empty of people. Show the space, architecture, and lighting only.',
-            'No text, no watermark, no collage, no split frames.',
-            '',
-            'Location: '.$environment->name,
-        ];
-
-        foreach ([
-            'Type' => $environment->type,
-            'Time of day' => $environment->time_of_day,
-            'Appearance' => $environment->appearance,
-            'Lighting' => $environment->lighting,
-            'Mood' => $environment->mood,
-            'Description' => $environment->description,
-        ] as $label => $value) {
-            if (filled($value)) {
-                $lines[] = $label.': '.$value;
-            }
-        }
-
-        if (filled($style)) {
-            $lines[] = 'Visual style: '.$style;
-        }
-
-        return implode("\n", $lines);
     }
 
     private function characterPrompt(Character $character, ?string $style): string
@@ -470,6 +335,35 @@ class ProjectImageGenerator
         return implode("\n", $lines);
     }
 
+    private function environmentPrompt(Environment $environment, ?string $style): string
+    {
+        $lines = [
+            'Create a single photorealistic empty location plate for a film.',
+            'No people, no text, no watermark, no collage, no split frames.',
+            '',
+            'Name: '.($environment->name ?: 'Untitled location'),
+        ];
+
+        foreach ([
+            'Type' => $environment->type,
+            'Time of day' => $environment->time_of_day,
+            'Description' => $environment->description,
+            'Appearance' => $environment->appearance,
+            'Lighting' => $environment->lighting,
+            'Mood' => $environment->mood,
+        ] as $label => $value) {
+            if (filled($value)) {
+                $lines[] = $label.': '.$value;
+            }
+        }
+
+        if (filled($style)) {
+            $lines[] = 'Visual style: '.$style;
+        }
+
+        return implode("\n", $lines);
+    }
+
     /**
      * @param  Collection<int, Character>  $characters
      */
@@ -479,6 +373,11 @@ class ProjectImageGenerator
             'Create a single cinematic storyboard still for a fictional film. One frame only.',
             'Keep it PG-13: implied action, no graphic injury, no blood, no sexual content.',
             'No text, no watermark, no split screen, no collage.',
+            '',
+            'This is a NEW frame. Follow THIS shot\'s action, camera, and location exactly.',
+            'Attached portraits are identity references only: copy faces, hair, clothing, and accessories.',
+            'Do not copy a studio backdrop, pose, expression, or environment from the portraits.',
+            'Do not copy a previous storyboard location, pose, or action.',
             '',
             'Shot: '.$this->softenForImage($shot->title ?: 'Untitled shot'),
         ];
@@ -514,16 +413,13 @@ class ProjectImageGenerator
 
         if ($cast->isNotEmpty()) {
             $lines[] = '';
-            $lines[] = 'Keep these characters looking consistent with the attached portraits:';
+            $lines[] = 'Identity (faces, hair, wardrobe, accessories only):';
             $lines = array_merge($lines, $cast->all());
         }
 
         if (filled($style)) {
             $lines[] = 'Visual style: '.$style;
         }
-
-        $lines[] = '';
-        $lines[] = 'If a previous still or location plate is attached, match those faces, wardrobe, and architecture.';
 
         return implode("\n", $lines);
     }

@@ -792,7 +792,7 @@ class ProjectController extends Controller
         $customPrompt = $request->input('custom_prompt') ?? $request->input('prompt');
         $customPrompt = is_string($customPrompt) ? trim($customPrompt) : null;
         $force = $request->boolean('force') || filled($customPrompt);
-        $shot->load(['scene.environment.assets', 'environment.assets', 'images']);
+        $shot->load(['scene', 'images']);
 
         try {
             $result = $images->generateShotStill($project, $shot, $force, $customPrompt);
@@ -1015,6 +1015,7 @@ class ProjectController extends Controller
             'image_status' => filled($primary?->image_url) ? 'completed' : $environment->image_status,
             'prompt' => $environment->prompt,
             'assets' => $assets->map(fn (EnvironmentAsset $asset) => $this->serializeEnvironmentAsset($asset))->values()->all(),
+            'updated_at' => optional($environment->updated_at)?->toIso8601String(),
         ];
     }
 
