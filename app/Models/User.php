@@ -53,4 +53,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(Project::class);
     }
+
+    public function systemErrorLogs(): HasMany
+    {
+        return $this->hasMany(SystemErrorLog::class);
+    }
 }

@@ -73,11 +73,18 @@ class ProjectImageGenerator
     /**
      * @return array{skipped: bool, shot: Shot, image: ShotImage|null}
      */
-    public function generateShotStill(Project $project, Shot $shot, bool $force = false): array
-    {
+    public function generateShotStill(
+        Project $project,
+        Shot $shot,
+        bool $force = false,
+        ?string $customPrompt = null,
+    ): array {
         $shot->loadMissing(['scene', 'environment', 'images']);
         $existing = $this->latestShotImage($shot);
-        if ($existing && filled($existing->image_url) && ! $force) {
+        $adjustment = is_string($customPrompt) ? trim($customPrompt) : '';
+        $shouldForce = $force || $adjustment !== '';
+
+        if ($existing && filled($existing->image_url) && ! $shouldForce) {
             return [
                 'skipped' => true,
                 'shot' => $shot,
@@ -89,11 +96,21 @@ class ProjectImageGenerator
         $prompt = $this->shotPrompt($shot, $characters, $project->style);
         $references = $this->characterReferences($characters, $shot);
 
+        if ($adjustment !== '') {
+            $prompt .= "\n\nEdit the attached existing still. Apply this adjustment:\n".$adjustment;
+            $currentStill = $this->store->readPublicUrl($existing?->image_url);
+            if ($currentStill !== null) {
+                array_unshift($references, $currentStill);
+                $references = array_slice($references, 0, 3);
+            }
+            $shot->prompt = $adjustment;
+        }
+
         try {
             $image = $this->tryShotImage($prompt, $references);
         } catch (GenerationFailedException $e) {
             $shot->image_status = 'failed';
-            $shot->generation_error = $e->getMessage();
+            $shot->generation_error = app(SystemErrorLogger::class)->userMessage($e);
             $shot->save();
             throw $e;
         }

@@ -23,6 +23,7 @@ use App\Models\Shot;
 use App\Models\ShotImage;
 use App\Services\ProjectImageGenerator;
 use App\Services\ProjectTextGenerator;
+use App\Services\SystemErrorLogger;
 use App\Support\StoryLength;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -126,10 +127,7 @@ class ProjectController extends Controller
         try {
             $script = $generator->scriptFromStory($story, $style);
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         $project->story = $story;
@@ -174,10 +172,7 @@ class ProjectController extends Controller
         try {
             $screenplay = $generator->screenplayFromStory($story, $style);
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         $project->story = $story;
@@ -239,10 +234,7 @@ class ProjectController extends Controller
                 $style,
             );
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         $project->story = $story;
@@ -341,10 +333,7 @@ class ProjectController extends Controller
                 $style,
             );
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         $episode->screenplay = $screenplay;
@@ -408,10 +397,7 @@ class ProjectController extends Controller
         try {
             $rows = $generator->scenesFromScreenplay($screenplay, $style);
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         $project->screenplay = $screenplay;
@@ -496,10 +482,7 @@ class ProjectController extends Controller
         try {
             $rows = $generator->charactersFromScreenplay($screenplay, $style, $sequences);
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         if ($style !== null) {
@@ -587,10 +570,7 @@ class ProjectController extends Controller
         try {
             $rows = $generator->environmentsFromScreenplay($screenplay, $style, $sequences);
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         if ($style !== null) {
@@ -674,10 +654,7 @@ class ProjectController extends Controller
         try {
             $rows = $generator->shotsFromSequences($screenplay, $sequences, $style);
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         $scenesByNumber = $scenes->keyBy('scene_number');
@@ -762,10 +739,7 @@ class ProjectController extends Controller
         try {
             $result = $images->generateCharacterPortrait($project, $character, $force);
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         return response()->json([
@@ -786,16 +760,15 @@ class ProjectController extends Controller
         abort_unless($shot->project_id === $project->id, 404);
         set_time_limit(180);
 
-        $force = $request->boolean('force');
+        $customPrompt = $request->input('custom_prompt') ?? $request->input('prompt');
+        $customPrompt = is_string($customPrompt) ? trim($customPrompt) : null;
+        $force = $request->boolean('force') || filled($customPrompt);
         $shot->load(['scene', 'images']);
 
         try {
-            $result = $images->generateShotStill($project, $shot, $force);
+            $result = $images->generateShotStill($project, $shot, $force, $customPrompt);
         } catch (GenerationFailedException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], $e->status);
+            return $this->generationFailed($e, $project);
         }
 
         return response()->json([
@@ -920,7 +893,7 @@ class ProjectController extends Controller
             'mood' => $scene->mood,
             'visual_style' => $scene->visual_style,
             'status' => $scene->status,
-            'generation_error' => $scene->generation_error,
+            'generation_error' => $this->publicErrorMessage($scene->generation_error),
             'generated_at' => optional($scene->generated_at)?->toIso8601String(),
         ];
     }
@@ -1042,6 +1015,7 @@ class ProjectController extends Controller
             'camera_movement' => $shot->camera_movement,
             'lighting' => $shot->lighting,
             'mood' => $shot->mood,
+            'prompt' => $shot->prompt,
             'image_url' => $latest?->image_url,
             'image_status' => filled($latest?->image_url) ? 'completed' : $shot->image_status,
             'review_status' => $shot->review_status,
@@ -1084,6 +1058,15 @@ class ProjectController extends Controller
             'screenplay' => $episode->screenplay,
             'status' => $episode->status,
         ];
+    }
+
+    private function publicErrorMessage(?string $message): ?string
+    {
+        if ($message === null || trim($message) === '') {
+            return null;
+        }
+
+        return app(SystemErrorLogger::class)->userMessageFromString($message);
     }
 
     private function storyTooLongPayload(string $story): array

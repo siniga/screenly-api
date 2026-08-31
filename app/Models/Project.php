@@ -59,4 +59,9 @@ class Project extends Model
     {
         return $this->hasMany(Episode::class)->orderBy('episode_number');
     }
+
+    public function systemErrorLogs(): HasMany
+    {
+        return $this->hasMany(SystemErrorLog::class);
+    }
 }

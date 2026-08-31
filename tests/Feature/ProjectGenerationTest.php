@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Project;
 use App\Models\User;
+use App\Services\SystemErrorLogger;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
@@ -59,7 +60,16 @@ class ProjectGenerationTest extends TestCase
         $this->postJson("/api/projects/{$project->id}/generate-script")
             ->assertStatus(429)
             ->assertJsonPath('success', false)
-            ->assertJsonFragment(['message' => 'Gemini API quota is exhausted. Check billing in Google AI Studio, then try again.']);
+            ->assertJsonPath('message', SystemErrorLogger::BUSY)
+            ->assertJsonMissing([
+                'message' => 'Gemini API quota is exhausted. Check billing in Google AI Studio, then try again.',
+            ]);
+
+        $this->assertDatabaseHas('system_error_logs', [
+            'project_id' => $project->id,
+            'message' => 'Gemini API quota is exhausted. Check billing in Google AI Studio, then try again.',
+            'user_message' => SystemErrorLogger::BUSY,
+        ]);
     }
 
     public function test_generate_screenplay_requires_a_story(): void
@@ -603,6 +613,59 @@ class ProjectGenerationTest extends TestCase
             ->assertJsonPath('skipped', true);
 
         Http::assertNothingSent();
+    }
+
+    public function test_generate_shot_image_regenerates_with_a_custom_prompt(): void
+    {
+        Storage::fake('public');
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($this->geminiImageResponse()),
+        ]);
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user, ['current_step' => 'storyboard']);
+        $scene = $project->scenes()->create([
+            'scene_number' => 1,
+            'order_index' => 0,
+            'title' => 'Kitchen wait',
+            'status' => 'completed',
+        ]);
+        $shot = $project->shots()->create([
+            'scene_id' => $scene->id,
+            'shot_number' => '1',
+            'order_index' => 0,
+            'title' => 'Man waits',
+            'image_status' => 'completed',
+        ]);
+        $existingPath = "projects/{$project->id}/shots/{$shot->id}-v1.png";
+        Storage::disk('public')->put($existingPath, 'existing-bytes');
+        $shot->images()->create([
+            'version_number' => 1,
+            'image_url' => '/storage/'.$existingPath,
+            'status' => 'completed',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/shots/{$shot->id}/generate-image", [
+            'custom_prompt' => 'Make the kitchen warmer and add morning light.',
+        ])
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('skipped', false)
+            ->assertJsonPath('shot.image_status', 'completed')
+            ->assertJsonPath('shot.prompt', 'Make the kitchen warmer and add morning light.');
+
+        $this->assertDatabaseHas('shots', [
+            'id' => $shot->id,
+            'prompt' => 'Make the kitchen warmer and add morning light.',
+        ]);
+        $this->assertDatabaseHas('shot_images', [
+            'shot_id' => $shot->id,
+            'version_number' => 2,
+            'status' => 'completed',
+        ]);
+        Http::assertSentCount(1);
     }
 
     private function projectFor(User $user, array $attributes = []): Project
