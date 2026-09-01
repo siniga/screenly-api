@@ -12,15 +12,18 @@ class ProjectTextGenerator
     {
         $styleLine = $this->styleLine($style);
 
+        $fidelity = $this->fidelityRules('story');
+
         $prompt = <<<PROMPT
-You are a professional screenwriter. Turn the story below into a proper film/TV screenplay.
+You are a formatter. Convert the story below into screenplay layout. Do not rewrite it.
 
 Rules:
 - Write in the same language as the story.
-- Keep the plot, characters, tone, and setting from the story. Do not invent a different story.
-- Use standard screenplay layout: FADE IN, INT./EXT. scene headings, action lines, CHARACTER names, dialogue, FADE OUT.
-- Use the visual style only as tone/atmosphere, not as camera jargon dumps.
-- Output plain text only. No markdown, no title page, no commentary before or after the screenplay.
+{$fidelity}
+- Format only: FADE IN, INT./EXT. headings, action lines, CHARACTER names, dialogue, FADE OUT.
+- Use only dialogue that already appears in the story. If there is no dialogue, write action only.
+- Use the visual style only as look/atmosphere. It must not change the story.
+- Output plain text only. No markdown, no title page, no commentary.
 {$styleLine}
 
 STORY:
@@ -38,15 +41,17 @@ PROMPT;
         $styleLine = $this->styleLine($style);
         $count = max(2, min(12, $targetCount));
 
+        $fidelity = $this->fidelityRules('story');
+
         $prompt = <<<PROMPT
-You are a series showrunner. Split the story below into {$count} episodes.
+You are a series editor. Split the story below into {$count} episodes. Do not rewrite it.
 
 Rules:
 - Keep the same language as the story.
-- Do not invent a different story. Cover the full plot across the episodes.
-- Each episode should be one short-film act: about 8-12 scenes, under 15 pages.
-- title: short episode title.
-- summary: 2-4 sentences of what happens in that episode only.
+{$fidelity}
+- Cover the full plot across the episodes, in the same order. Do not add filler episodes or new acts.
+- title: short title from events that already happen.
+- summary: 2-4 sentences of what already happens in that slice only.
 - Output JSON only: {"episodes":[{"episode_number":1,"title":"...","summary":"..."}]}
 {$styleLine}
 
@@ -113,24 +118,26 @@ PROMPT;
             ? "What already happened:\n{$previous}"
             : 'This is the first episode.';
 
+        $fidelity = $this->fidelityRules('story');
+
         $prompt = <<<PROMPT
-You are a professional screenwriter. Write ONLY episode {$number} as a proper film/TV screenplay.
+You are a formatter. Write ONLY episode {$number} by converting that slice of the story into screenplay layout. Do not rewrite it.
 
 Episode title: {$title}
 Episode summary: {$summary}
 
 Rules:
 - Write in the same language as the story.
-- Keep the plot, characters, tone, and setting from the story. Do not invent a different story.
-- Cover only this episode. Do not write later episodes.
-- Keep it short enough to generate reliably: 8-12 scenes, under 15 pages.
-- Use standard screenplay layout: FADE IN, INT./EXT. scene headings, action lines, CHARACTER names, dialogue, FADE OUT.
+{$fidelity}
+- Cover only the events in this episode summary. Do not write later episodes or invent bridges.
+- Use only dialogue that already appears in the story for these events.
+- Format only: FADE IN, INT./EXT. headings, action lines, CHARACTER names, dialogue, FADE OUT.
 - Output plain text only. No markdown, no title page, no commentary.
 {$styleLine}
 
 {$previousBlock}
 
-FULL STORY (for continuity):
+FULL STORY (source of truth):
 {$story}
 PROMPT;
 
@@ -141,15 +148,17 @@ PROMPT;
     {
         $styleLine = $this->styleLine($style);
 
+        $fidelity = $this->fidelityRules('story');
+
         $prompt = <<<PROMPT
-You are a professional screenwriter. Turn the story below into a readable film/TV script.
+You are a formatter. Convert the story below into a readable film/TV script. Do not rewrite it.
 
 Rules:
 - Write in the same language as the story.
-- Keep the plot, characters, tone, and setting from the story. Do not invent a different story.
-- Output a script with scene headings (INT./EXT.), brief action lines, and character dialogue.
-- Use the visual style only as tone/atmosphere, not as camera jargon dumps.
-- Output plain text only. No markdown, no title page, no commentary before or after the script.
+{$fidelity}
+- Output scene headings (INT./EXT.), action lines, and only dialogue that already appears in the story.
+- Use the visual style only as look/atmosphere. It must not change the story.
+- Output plain text only. No markdown, no title page, no commentary.
 {$styleLine}
 
 STORY:
@@ -162,28 +171,31 @@ PROMPT;
     /**
      * @return list<array{title: string, location: ?string, time_of_day: ?string, description: ?string, mood: ?string}>
      */
-    public function scenesFromScreenplay(string $screenplay, ?string $style = null): array
+    public function scenesFromScreenplay(string $screenplay, ?string $style = null, ?string $sourceStory = null): array
     {
         $styleLine = $this->styleLine($style);
+        $fidelity = $this->fidelityRules('screenplay');
+        $storyLock = $this->sourceStoryBlock($sourceStory);
 
         $prompt = <<<PROMPT
-You are a storyboard supervisor. Break the screenplay below into visual story sequences suitable for generating a storyboard.
+You are a storyboard supervisor. Extract visual sequences from the screenplay. Do not invent story.
 
 Rules:
 - Keep the same language as the screenplay.
+{$fidelity}
 - Do not divide sequences based only on location or time changes (INT./EXT. headings).
-- Create a new sequence whenever there is a major action, emotional shift, decision, problem, or reveal.
+- Create a new sequence whenever there is a major action, emotional shift, decision, problem, or reveal that is already in the screenplay.
 - One location or time block may contain several sequences. A new heading does not always start a new sequence.
-- Every important event from the screenplay must appear in at least one sequence. Do not invent plot that is not in the screenplay.
-- Do not over-summarize or omit actions. Cover the complete screenplay from beginning to end, in order.
-- Return enough sequences to represent the whole story, typically 8-20 for an episode-length screenplay.
-- title: short sequence title.
-- location: place where this sequence mostly happens (no INT./EXT.).
-- time_of_day: DAY, NIGHT, DAWN, DUSK, or similar.
-- description: 2-5 sentences of what happens — who does what, what changes. No camera jargon.
-- mood: one short mood word or phrase.
+- Cover every event from the screenplay, in order. Do not omit actions and do not add new ones.
+- Use as many sequences as the events require. Do not pad to a count and do not compress away events.
+- title: short sequence title from what happens.
+- location: place named in the screenplay (no INT./EXT.).
+- time_of_day: only if stated or clearly implied; otherwise omit.
+- description: 2-5 sentences of what already happens — who does what. No camera jargon. No new motives.
+- mood: one short mood word from the scene, or omit.
 - Output JSON only: {"scenes":[...]} with those keys on each sequence.
 {$styleLine}
+{$storyLock}
 
 SCREENPLAY:
 {$screenplay}
@@ -233,32 +245,33 @@ PROMPT;
      * @param  list<array{title?: string, description?: string}>  $sequences
      * @return list<array{name: string, role: ?string, gender: ?string, age_range: ?string, ethnicity: ?string, description: ?string, personality: ?string, appearance: ?string, wardrobe: ?string, importance: ?string}>
      */
-    public function charactersFromScreenplay(string $screenplay, ?string $style = null, array $sequences = []): array
+    public function charactersFromScreenplay(string $screenplay, ?string $style = null, array $sequences = [], ?string $sourceStory = null): array
     {
         $styleLine = $this->styleLine($style);
         $sequenceBlock = $this->sequenceContext($sequences);
+        $fidelity = $this->fidelityRules('screenplay');
+        $storyLock = $this->sourceStoryBlock($sourceStory);
 
         $prompt = <<<PROMPT
-You are a casting director. Extract the character list from the screenplay below.
+You are a casting director. Extract the character list. Do not invent people or looks.
 
 Rules:
 - Keep the same language as the screenplay.
-- Include named speaking characters and any unnamed character who drives a plot beat.
-- Do not invent people who are not in the screenplay.
+{$fidelity}
+- Include named speaking characters and any unnamed character who already drives a plot beat.
 - Skip background extras who only appear in a crowd or one passing mention.
-- Typically 4-12 characters. Lead first, then supporting, then minor.
+- List only characters who appear. Do not pad to a count.
 - name: character name as written (or a short label like "THE KNOCKER" if unnamed).
-- role: protagonist, antagonist, supporting, or minor.
-- gender: as implied, or unknown.
-- age_range: short, e.g. 30s, teen, elderly.
-- ethnicity: only if the screenplay states or clearly implies it; otherwise omit.
-- description: 1-3 sentences of who they are and what they want in this story.
-- personality: a few traits.
-- appearance: visible look from the screenplay, no camera jargon.
-- wardrobe: a complete locked costume for this film (top, bottom, shoes, and 1-2 accessories, with colors and materials). Use screenplay details when present; otherwise invent a specific look and keep it consistent.
+- role: protagonist, antagonist, supporting, or minor — only if clear from the text.
+- gender, age_range, ethnicity: only if stated or clearly implied; otherwise omit.
+- description: 1-3 sentences from what the text already says they do. Do not invent wants or backstory.
+- personality: only traits shown in the text; otherwise omit.
+- appearance: only visible details stated in the text. If none, omit.
+- wardrobe: only clothing stated in the text. If none, omit. Do not invent a costume.
 - importance: lead, supporting, or minor.
 - Output JSON only: {"characters":[...]} with those keys on each character.
 {$styleLine}
+{$storyLock}
 {$sequenceBlock}
 
 SCREENPLAY:
@@ -311,29 +324,31 @@ PROMPT;
      * @param  list<array{title?: string, description?: string, location?: string}>  $sequences
      * @return list<array{name: string, type: ?string, time_of_day: ?string, description: ?string, appearance: ?string, lighting: ?string, mood: ?string, importance: ?string}>
      */
-    public function environmentsFromScreenplay(string $screenplay, ?string $style = null, array $sequences = []): array
+    public function environmentsFromScreenplay(string $screenplay, ?string $style = null, array $sequences = [], ?string $sourceStory = null): array
     {
         $styleLine = $this->styleLine($style);
         $sequenceBlock = $this->sequenceContext($sequences);
+        $fidelity = $this->fidelityRules('screenplay');
+        $storyLock = $this->sourceStoryBlock($sourceStory);
 
         $prompt = <<<PROMPT
-You are a production designer. Extract the distinct environments (places) needed to film the screenplay below.
+You are a production designer. Extract the places that already appear. Do not invent locations.
 
 Rules:
 - Keep the same language as the screenplay.
+{$fidelity}
 - One object per unique place. Merge the same location at different times into one environment unless the place itself changes.
-- Do not invent locations that do not appear in the screenplay or sequences.
-- Typically 3-10 environments. Most important places first.
-- name: place name (no INT./EXT.).
-- type: interior, exterior, or mixed.
-- time_of_day: the time it is mostly seen, or mixed.
-- description: 1-3 sentences of what this place is and how it is used.
-- appearance: visible look, architecture, colors, materials. No camera jargon.
-- lighting: natural light, practicals, mood lighting, etc.
-- mood: one short mood word or phrase.
+- List only places that appear. Do not pad to a count.
+- name: place name as written (no INT./EXT.).
+- type: interior, exterior, or mixed — only if clear.
+- time_of_day: only if stated or clearly implied; otherwise omit.
+- description: 1-3 sentences of how the place is used in the text. No new history.
+- appearance: only architecture, colors, or materials stated in the text. If none, omit.
+- lighting / mood: only if stated or clearly implied; otherwise omit.
 - importance: primary, supporting, or minor.
 - Output JSON only: {"environments":[...]} with those keys on each environment.
 {$styleLine}
+{$storyLock}
 {$sequenceBlock}
 
 SCREENPLAY:
@@ -384,33 +399,33 @@ PROMPT;
      * @param  list<array{scene_number?: int, title?: string, description?: string, location?: string}>  $sequences
      * @return list<array{scene_number: int, title: string, description: ?string, action: ?string, dialogue: ?string, shot_size: ?string, camera_angle: ?string, camera_movement: ?string, lighting: ?string, mood: ?string, environment: ?string}>
      */
-    public function shotsFromSequences(string $screenplay, array $sequences, ?string $style = null): array
+    public function shotsFromSequences(string $screenplay, array $sequences, ?string $style = null, ?string $sourceStory = null): array
     {
         $styleLine = $this->styleLine($style);
         $sequenceBlock = $this->numberedSequenceContext($sequences);
+        $fidelity = $this->fidelityRules('screenplay and sequences');
+        $storyLock = $this->sourceStoryBlock($sourceStory);
 
         $prompt = <<<PROMPT
-You are a director. Break the visual sequences below into storyboard shots. Do not generate images. Describe shots only.
+You are a director. Cover the sequences with storyboard shots. Do not generate images. Do not invent story.
 
 Rules:
 - Keep the same language as the screenplay.
-- Create 2-6 shots per sequence. Cover the important action in that sequence.
-- Do not invent plot that is not in the sequences or screenplay.
+{$fidelity}
+- Create only as many shots as needed to show the action already in that sequence (usually 2-6). Do not add extra beats.
 - Every sequence listed must have at least one shot. Use that sequence's scene_number.
-- title: short shot title.
-- description: what we see.
-- action: what happens in the shot.
-- dialogue: spoken line if any, else omit.
-- shot_size: WIDE, FULL, MEDIUM, CLOSE-UP, or similar.
-- camera_angle: EYE LEVEL, LOW, HIGH, OVER THE SHOULDER, or similar.
-- camera_movement: STATIC, PAN, TILT, TRACK, HANDHELD, or similar.
-- lighting and mood: short phrases.
-- environment: place name for this shot.
+- title: short shot title from what happens.
+- description: what we already see in that beat.
+- action: the action already written. No new business.
+- dialogue: copy a spoken line only if it already exists; otherwise omit.
+- shot_size, camera_angle, camera_movement: coverage only. These must not change the story.
+- lighting, mood, environment: from the sequence/screenplay only.
 - Output JSON only: {"shots":[...]} with scene_number and those keys on each shot.
 {$styleLine}
+{$storyLock}
 {$sequenceBlock}
 
-SCREENPLAY (for continuity):
+SCREENPLAY:
 {$screenplay}
 PROMPT;
 
@@ -462,14 +477,17 @@ PROMPT;
     {
         $styleLine = $this->styleLine($style);
 
+        $fidelity = $this->fidelityRules('script');
+
         $prompt = <<<PROMPT
-You are a professional screenwriter. Format the draft script below into a proper screenplay.
+You are a formatter. Put the draft script into screenplay layout. Do not rewrite it.
 
 Rules:
 - Write in the same language as the script.
-- Keep the same scenes, characters, and dialogue. Tighten formatting; do not rewrite the plot.
-- Use standard screenplay layout: FADE IN, INT./EXT. scene headings, action, CHARACTER names, dialogue, FADE OUT.
-- Output plain text only. No markdown, no title page, no commentary before or after the screenplay.
+{$fidelity}
+- Keep the same scenes, characters, action, and dialogue. Change formatting only.
+- Format: FADE IN, INT./EXT. headings, action, CHARACTER names, dialogue, FADE OUT.
+- Output plain text only. No markdown, no title page, no commentary.
 {$styleLine}
 
 SCRIPT:
@@ -545,12 +563,33 @@ PROMPT;
         return "SEQUENCES:\n{$lines}";
     }
 
+    private function fidelityRules(string $sourceLabel): string
+    {
+        return <<<RULES
+- The {$sourceLabel} is the only source of plot, people, places, events, and spoken words.
+- Do not add plot, characters, locations, objects, motives, backstory, or dialogue that is not in the {$sourceLabel}.
+- Do not remove, merge, reorder, or replace events, characters, or spoken lines from the {$sourceLabel}.
+- If a detail is missing (costume, age, ethnicity, backstory), omit it or write unspecified. Do not invent it.
+- Use the same names and the same order of events.
+RULES;
+    }
+
+    private function sourceStoryBlock(?string $story): string
+    {
+        $trimmed = trim((string) $story);
+        if ($trimmed === '') {
+            return '';
+        }
+
+        return "ORIGINAL STORY (source of truth — if later text disagrees, follow this story):\n{$trimmed}\n";
+    }
+
     private function styleLine(?string $style): string
     {
         $trimmed = trim((string) $style);
 
         return $trimmed !== ''
-            ? "Visual style: {$trimmed}."
+            ? "Visual style (look only, not story): {$trimmed}. Do not use style to add plot, characters, or dialogue."
             : '';
     }
 

@@ -397,7 +397,11 @@ class ProjectController extends Controller
         }
 
         try {
-            $rows = $generator->scenesFromScreenplay($screenplay, $style);
+            $rows = $generator->scenesFromScreenplay(
+                $screenplay,
+                $style,
+                $this->sourceStory($project),
+            );
         } catch (GenerationFailedException $e) {
             return $this->generationFailed($e, $project);
         }
@@ -482,7 +486,12 @@ class ProjectController extends Controller
             ->all();
 
         try {
-            $rows = $generator->charactersFromScreenplay($screenplay, $style, $sequences);
+            $rows = $generator->charactersFromScreenplay(
+                $screenplay,
+                $style,
+                $sequences,
+                $this->sourceStory($project),
+            );
         } catch (GenerationFailedException $e) {
             return $this->generationFailed($e, $project);
         }
@@ -570,7 +579,12 @@ class ProjectController extends Controller
             ->all();
 
         try {
-            $rows = $generator->environmentsFromScreenplay($screenplay, $style, $sequences);
+            $rows = $generator->environmentsFromScreenplay(
+                $screenplay,
+                $style,
+                $sequences,
+                $this->sourceStory($project),
+            );
         } catch (GenerationFailedException $e) {
             return $this->generationFailed($e, $project);
         }
@@ -654,7 +668,12 @@ class ProjectController extends Controller
         ])->all();
 
         try {
-            $rows = $generator->shotsFromSequences($screenplay, $sequences, $style);
+            $rows = $generator->shotsFromSequences(
+                $screenplay,
+                $sequences,
+                $style,
+                $this->sourceStory($project),
+            );
         } catch (GenerationFailedException $e) {
             return $this->generationFailed($e, $project);
         }
@@ -838,6 +857,13 @@ class ProjectController extends Controller
     private function authorizeProject(Request $request, Project $project): void
     {
         abort_unless($project->user_id === $request->user()->id, 404);
+    }
+
+    private function sourceStory(Project $project): ?string
+    {
+        $story = trim((string) ($project->story ?? ''));
+
+        return $story !== '' ? $story : null;
     }
 
     private function styleFromRequest(array $data, Project $project): ?string
