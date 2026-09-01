@@ -752,6 +752,33 @@ class ProjectController extends Controller
         ]);
     }
 
+    public function generateCharacterCostume(
+        Request $request,
+        Project $project,
+        Character $character,
+        ProjectImageGenerator $images,
+    ): JsonResponse {
+        $this->authorizeProject($request, $project);
+        abort_unless($character->project_id === $project->id, 404);
+        set_time_limit(180);
+
+        $force = $request->boolean('force');
+        $character->load('assets');
+
+        try {
+            $result = $images->generateCharacterCostumeSheet($project, $character, $force);
+        } catch (GenerationFailedException $e) {
+            return $this->generationFailed($e, $project);
+        }
+
+        return response()->json([
+            'success' => true,
+            'skipped' => $result['skipped'],
+            'character' => $this->serializeCharacter($result['character']),
+            'asset' => $result['asset'] ? $this->serializeCharacterAsset($result['asset']) : null,
+        ]);
+    }
+
     public function generateEnvironmentImage(
         Request $request,
         Project $project,
@@ -941,9 +968,14 @@ class ProjectController extends Controller
         $assets = $character->relationLoaded('assets')
             ? $character->assets
             : $character->assets()->get();
-        $primary = $assets->first(
+        $portrait = $assets->first(
+            fn (CharacterAsset $asset) => $asset->asset_type === 'portrait' && filled($asset->image_url)
+        ) ?? $assets->first(
             fn (CharacterAsset $asset) => $asset->is_primary && filled($asset->image_url)
-        ) ?? $assets->first(fn (CharacterAsset $asset) => filled($asset->image_url));
+        );
+        $costume = $assets->first(
+            fn (CharacterAsset $asset) => $asset->asset_type === 'costume' && filled($asset->image_url)
+        );
 
         return [
             'id' => $character->id,
@@ -960,8 +992,9 @@ class ProjectController extends Controller
             'wardrobe' => $character->wardrobe,
             'importance' => $character->importance,
             'status' => $character->status,
-            'image_url' => $primary?->image_url,
-            'image_status' => filled($primary?->image_url) ? 'completed' : $character->image_status,
+            'image_url' => $portrait?->image_url,
+            'costume_image_url' => $costume?->image_url,
+            'image_status' => filled($portrait?->image_url) ? 'completed' : $character->image_status,
             'prompt' => $character->prompt,
             'assets' => $assets->map(fn (CharacterAsset $asset) => $this->serializeCharacterAsset($asset))->values()->all(),
             'updated_at' => optional($character->updated_at)?->toIso8601String(),

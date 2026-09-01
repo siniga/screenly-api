@@ -255,7 +255,7 @@ Rules:
 - description: 1-3 sentences of who they are and what they want in this story.
 - personality: a few traits.
 - appearance: visible look from the screenplay, no camera jargon.
-- wardrobe: clothing if mentioned.
+- wardrobe: a complete locked costume for this film (top, bottom, shoes, and 1-2 accessories, with colors and materials). Use screenplay details when present; otherwise invent a specific look and keep it consistent.
 - importance: lead, supporting, or minor.
 - Output JSON only: {"characters":[...]} with those keys on each character.
 {$styleLine}

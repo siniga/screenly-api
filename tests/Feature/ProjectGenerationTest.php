@@ -668,6 +668,93 @@ class ProjectGenerationTest extends TestCase
         Http::assertSentCount(1);
     }
 
+    public function test_generate_character_costume_saves_a_sheet(): void
+    {
+        Storage::fake('public');
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($this->geminiImageResponse()),
+        ]);
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user);
+        $character = $project->characters()->create([
+            'order_index' => 0,
+            'name' => 'Chloe',
+            'wardrobe' => 'Grey coat, cream sweater, silver pendant, black boots',
+            'image_status' => 'completed',
+        ]);
+        $portraitPath = "projects/{$project->id}/characters/{$character->id}.png";
+        Storage::disk('public')->put($portraitPath, 'portrait-bytes');
+        $character->assets()->create([
+            'asset_type' => 'portrait',
+            'title' => 'Chloe',
+            'image_url' => '/storage/'.$portraitPath,
+            'is_primary' => true,
+            'status' => 'completed',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/characters/{$character->id}/generate-costume")
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('skipped', false)
+            ->assertJsonPath('character.costume_image_url', "/storage/projects/{$project->id}/characters/{$character->id}-costume.png");
+
+        $this->assertDatabaseHas('character_assets', [
+            'character_id' => $character->id,
+            'asset_type' => 'costume',
+            'status' => 'completed',
+        ]);
+        $this->assertTrue(
+            Storage::disk('public')->exists("projects/{$project->id}/characters/{$character->id}-costume.png")
+        );
+
+        Http::assertSent(function ($request) {
+            $parts = data_get($request->data(), 'contents.0.parts', []);
+            $text = collect($parts)->pluck('text')->filter()->implode("\n");
+            $inline = collect($parts)
+                ->map(fn ($part) => data_get($part, 'inlineData.data') ?? data_get($part, 'inline_data.data'))
+                ->filter()
+                ->values();
+
+            $this->assertStringContainsString('full-body costume sheet', $text);
+            $this->assertTrue($inline->contains(base64_encode('portrait-bytes')));
+
+            return true;
+        });
+    }
+
+    public function test_generate_character_costume_skips_when_a_sheet_already_exists(): void
+    {
+        Storage::fake('public');
+        Http::fake();
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user);
+        $character = $project->characters()->create([
+            'order_index' => 0,
+            'name' => 'Chloe',
+            'image_status' => 'completed',
+        ]);
+        $character->assets()->create([
+            'asset_type' => 'costume',
+            'title' => 'Chloe costume',
+            'image_url' => '/storage/projects/1/characters/1-costume.png',
+            'is_primary' => false,
+            'status' => 'completed',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/characters/{$character->id}/generate-costume")
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('skipped', true);
+
+        Http::assertNothingSent();
+    }
+
     public function test_generate_environment_image_saves_a_plate(): void
     {
         Storage::fake('public');
@@ -730,6 +817,15 @@ class ProjectGenerationTest extends TestCase
             'title' => 'Chloe',
             'image_url' => '/storage/'.$portraitPath,
             'is_primary' => true,
+            'status' => 'completed',
+        ]);
+        $costumePath = "projects/{$project->id}/characters/{$character->id}-costume.png";
+        Storage::disk('public')->put($costumePath, 'costume-sheet-bytes');
+        $character->assets()->create([
+            'asset_type' => 'costume',
+            'title' => 'Chloe costume',
+            'image_url' => '/storage/'.$costumePath,
+            'is_primary' => false,
             'status' => 'completed',
         ]);
 
@@ -796,11 +892,11 @@ class ProjectGenerationTest extends TestCase
                 ->filter()
                 ->values();
 
-            $this->assertStringContainsString('identity references only', $text);
+            $this->assertStringContainsString('costume sheets', $text);
+            $this->assertStringContainsString('MUST WEAR: Grey coat', $text);
             $this->assertStringContainsString('Do not copy a previous storyboard location', $text);
-            $this->assertStringNotContainsString('previous still', strtolower($text));
-            $this->assertStringNotContainsString('location plate', strtolower($text));
-            $this->assertTrue($inline->contains(base64_encode('portrait-bytes')));
+            $this->assertTrue($inline->contains(base64_encode('costume-sheet-bytes')));
+            $this->assertFalse($inline->contains(base64_encode('portrait-bytes')));
             $this->assertFalse($inline->contains(base64_encode('previous-still-bytes')));
             $this->assertFalse($inline->contains(base64_encode('environment-plate-bytes')));
 
