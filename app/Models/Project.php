@@ -18,6 +18,7 @@ class Project extends Model
         'current_step',
         'status',
         'cover_image_url',
+        'share_token',
     ];
 
     public function user(): BelongsTo

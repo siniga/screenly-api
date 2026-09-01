@@ -2,6 +2,8 @@
 
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ProjectController;
+use App\Http\Controllers\ProjectShareController;
+use App\Http\Controllers\PublicStoryboardController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/health', function () {
@@ -10,6 +12,7 @@ Route::get('/health', function () {
 
 Route::post('/auth/register', [AuthController::class, 'register']);
 Route::post('/auth/login', [AuthController::class, 'login']);
+Route::get('/public/storyboards/{token}', [PublicStoryboardController::class, 'show']);
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/auth/user', [AuthController::class, 'user']);
@@ -21,6 +24,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/projects/{project}', [ProjectController::class, 'update']);
     Route::patch('/projects/{project}', [ProjectController::class, 'update']);
     Route::delete('/projects/{project}', [ProjectController::class, 'destroy']);
+    Route::get('/projects/{project}/share', [ProjectShareController::class, 'show']);
+    Route::post('/projects/{project}/share', [ProjectShareController::class, 'store']);
+    Route::delete('/projects/{project}/share', [ProjectShareController::class, 'destroy']);
     Route::post('/projects/{project}/generate-script', [ProjectController::class, 'generateScript']);
     Route::post('/projects/{project}/generate-screenplay', [ProjectController::class, 'generateScreenplay']);
     Route::post('/projects/{project}/plan-episodes', [ProjectController::class, 'planEpisodes']);
