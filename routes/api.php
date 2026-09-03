@@ -3,6 +3,7 @@
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\ProjectShareController;
+use App\Http\Controllers\ProjectStoryAnalysisController;
 use App\Http\Controllers\PublicStoryboardController;
 use Illuminate\Support\Facades\Route;
 
@@ -28,6 +29,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/projects/{project}/share', [ProjectShareController::class, 'show']);
     Route::post('/projects/{project}/share', [ProjectShareController::class, 'store']);
     Route::delete('/projects/{project}/share', [ProjectShareController::class, 'destroy']);
+    Route::get('/projects/{project}/story-analysis', [ProjectStoryAnalysisController::class, 'show']);
+    Route::post('/projects/{project}/analyze-story', [ProjectStoryAnalysisController::class, 'store']);
     Route::post('/projects/{project}/generate-script', [ProjectController::class, 'generateScript']);
     Route::post('/projects/{project}/generate-screenplay', [ProjectController::class, 'generateScreenplay']);
     Route::post('/projects/{project}/plan-episodes', [ProjectController::class, 'planEpisodes']);

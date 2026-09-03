@@ -135,6 +135,11 @@ class Project extends Model
         return $this->hasMany(Episode::class)->orderBy('episode_number');
     }
 
+    public function storyAnalyses(): HasMany
+    {
+        return $this->hasMany(ProjectStoryAnalysis::class);
+    }
+
     public function systemErrorLogs(): HasMany
     {
         return $this->hasMany(SystemErrorLog::class);

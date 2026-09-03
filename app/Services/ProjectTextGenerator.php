@@ -2,11 +2,13 @@
 
 namespace App\Services;
 
+use App\Exceptions\GenerationFailedException;
+use App\Support\StoryAnalysisValidator;
+use App\Support\StorySourceBlocks;
+
 class ProjectTextGenerator
 {
-    public function __construct(private GeminiClient $gemini)
-    {
-    }
+    public function __construct(private GeminiClient $gemini) {}
 
     public function screenplayFromStory(string $story, ?string $style = null): string
     {
@@ -31,6 +33,147 @@ STORY:
 PROMPT;
 
         return $this->gemini->generateText($prompt, 16384);
+    }
+
+    /**
+     * Analyse a story into a structured source of truth. Does not write a screenplay.
+     *
+     * @return array<string, mixed>
+     */
+    public function analyzeStory(string $story): array
+    {
+        $blocks = StorySourceBlocks::fromStory($story);
+        if ($blocks === []) {
+            throw new GenerationFailedException('Story has no readable source blocks.');
+        }
+
+        $blocksJson = json_encode($blocks, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (! is_string($blocksJson)) {
+            throw new GenerationFailedException('Story source blocks could not be encoded.');
+        }
+
+        $prompt = <<<PROMPT
+You are a strict narrative continuity analyst. Analyse the submitted story without rewriting or adapting it.
+
+The story may use non-linear narration, flashbacks, memories, dreams, symbolism, withheld information, repeated phrases, ambiguous language and internal thoughts.
+
+Extract only information supported by the source blocks.
+
+Rules:
+- Never invent characters, ages, appearances, ethnicity, wardrobe, relationships, locations, events, motives, dialogue, backstory or outcomes.
+- Use null when a value is unknown.
+- Every extracted factual claim must include one or more supporting source IDs.
+- Distinguish clock times from ages using grammar and context.
+- A phrase such as "At eleven, they arrived" normally describes time, not someone's age.
+- A phrase such as "At eleven, they brought in the white dress" is clock time, not a character's age.
+- Do not infer ethnicity from names, language or location.
+- Do not infer physical appearance unless explicitly described.
+- Gender may only be identified from explicit language or unambiguous pronouns.
+- Preserve the original order of story beats.
+- Identify when the narration moves into a flashback, memory, dream, imagined event or returns to the present.
+- Identify information intentionally hidden and revealed later.
+- Preserve repeated phrases, parallels and ending payoffs when they affect the story's meaning.
+- Copy dialogue exactly and assign it only when the speaker is supported by the source.
+- Do not silently solve contradictions.
+- Put contradictions in the contradictions array.
+- Put materially uncertain interpretations in ambiguities.
+- This is analysis only. Do not create screenplay headings, camera directions, shots or new dialogue.
+- Output valid JSON only matching the required schema.
+
+Required JSON object:
+{
+  "language": "English",
+  "story_type": "short_story",
+  "characters": [
+    {
+      "character_id": "character_001",
+      "name": "Name as written",
+      "aliases": [],
+      "gender": null,
+      "age": null,
+      "age_range": null,
+      "relationships": [{"character_id": "character_002", "name": "Other", "type": "sibling", "source_ids": ["source_001"]}],
+      "confirmed_facts": [{"fact": "Only a fact stated in the source", "source_ids": ["source_001"]}],
+      "unknown_details": ["appearance"],
+      "source_ids": ["source_001"]
+    }
+  ],
+  "locations": [
+    {
+      "location_id": "location_001",
+      "name": "Location name as written",
+      "type": "interior",
+      "confirmed_details": [{"fact": "A stated detail", "source_ids": ["source_001"]}],
+      "source_ids": ["source_001"]
+    }
+  ],
+  "time_expressions": [
+    {
+      "text": "Exact phrase",
+      "interpretation": "11:00",
+      "meaning_type": "clock_time",
+      "confidence": 0.99,
+      "source_ids": ["source_001"]
+    }
+  ],
+  "timelines": [
+    {
+      "timeline_id": "timeline_present",
+      "type": "present",
+      "description": "Current narrative timeline.",
+      "source_ids": ["source_001"]
+    }
+  ],
+  "beats": [
+    {
+      "beat_id": "beat_001",
+      "order": 1,
+      "timeline_id": "timeline_present",
+      "type": "action",
+      "summary": "A factual summary of what happens.",
+      "characters": ["character_001"],
+      "location_id": null,
+      "importance": "critical",
+      "must_appear": true,
+      "source_ids": ["source_001"]
+    }
+  ],
+  "dialogue": [
+    {
+      "dialogue_id": "dialogue_001",
+      "speaker": "Character name or null",
+      "text": "Exact dialogue from the story",
+      "beat_id": "beat_001",
+      "source_ids": ["source_001"]
+    }
+  ],
+  "internal_narration": [],
+  "flashbacks": [],
+  "delayed_reveals": [],
+  "motifs": [],
+  "must_preserve_elements": [],
+  "unknown_details": [],
+  "ambiguities": [],
+  "contradictions": []
+}
+
+Enums:
+- story_type: short_story, novella, novel, excerpt, other
+- location type: interior, exterior, mixed, unknown
+- timeline type: present, flashback, flash_forward, memory, dream, imagined, unknown
+- beat type: action, dialogue, decision, revelation, transition, internal, ending
+- importance: critical, important, supporting
+- meaning_type: clock_time, age, duration, date, relative_time, unknown
+
+Use the source_id values exactly as given. Do not invent source IDs.
+
+SOURCE BLOCKS:
+{$blocksJson}
+PROMPT;
+
+        $payload = $this->gemini->generateJson($prompt, 16384);
+
+        return StoryAnalysisValidator::normalize($payload, $blocks);
     }
 
     /**
@@ -87,7 +230,7 @@ PROMPT;
         }
 
         if (count($episodes) < 2) {
-            throw new \App\Exceptions\GenerationFailedException(
+            throw new GenerationFailedException(
                 'Gemini did not return enough episodes for this story.',
             );
         }
@@ -233,7 +376,7 @@ PROMPT;
         }
 
         if ($scenes === []) {
-            throw new \App\Exceptions\GenerationFailedException(
+            throw new GenerationFailedException(
                 'Gemini did not return any sequences from the screenplay.',
             );
         }
@@ -312,7 +455,7 @@ PROMPT;
         }
 
         if ($characters === []) {
-            throw new \App\Exceptions\GenerationFailedException(
+            throw new GenerationFailedException(
                 'Gemini did not return any characters from the screenplay.',
             );
         }
@@ -387,7 +530,7 @@ PROMPT;
         }
 
         if ($environments === []) {
-            throw new \App\Exceptions\GenerationFailedException(
+            throw new GenerationFailedException(
                 'Gemini did not return any environments from the screenplay.',
             );
         }
@@ -481,7 +624,7 @@ PROMPT;
         }
 
         if ($shots === []) {
-            throw new \App\Exceptions\GenerationFailedException(
+            throw new GenerationFailedException(
                 'Gemini did not return any shots from the sequences.',
             );
         }
