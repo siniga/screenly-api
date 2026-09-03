@@ -12,6 +12,7 @@ use App\Http\Requests\GenerateScriptRequest;
 use App\Http\Requests\GenerateShotsRequest;
 use App\Http\Requests\PlanEpisodesRequest;
 use App\Http\Requests\StoreProjectRequest;
+use App\Http\Requests\UpdateCharacterRequest;
 use App\Http\Requests\UpdateProjectRequest;
 use App\Models\Character;
 use App\Models\CharacterAsset;
@@ -23,8 +24,10 @@ use App\Models\Scene;
 use App\Models\Shot;
 use App\Models\ShotImage;
 use App\Services\ProjectImageGenerator;
+use App\Services\ProjectImageStore;
 use App\Services\ProjectTextGenerator;
 use App\Services\SystemErrorLogger;
+use App\Support\CharacterNameMatch;
 use App\Support\StoryLength;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -37,12 +40,18 @@ class ProjectController extends Controller
             ->projects()
             ->withCount(['scenes', 'shots'])
             ->latest('updated_at')
-            ->get()
-            ->map(fn (Project $project) => $this->summary($project));
+            ->get();
+
+        $sceneCovers = $this->sceneCoverUrlsByProjectId($projects->pluck('id')->all());
 
         return response()->json([
             'success' => true,
-            'projects' => $projects,
+            'projects' => $projects
+                ->map(fn (Project $project) => $this->summary(
+                    $project,
+                    $sceneCovers[(int) $project->id] ?? null,
+                ))
+                ->values(),
         ]);
     }
 
@@ -55,6 +64,7 @@ class ProjectController extends Controller
         }
 
         $project = $request->user()->projects()->create($attributes);
+        $this->attachBundledStylePreview($project);
 
         return response()->json([
             'success' => true,
@@ -90,6 +100,7 @@ class ProjectController extends Controller
 
         $project->fill($this->attributesFromRequest($request->validated()));
         $project->save();
+        $this->attachBundledStylePreview($project);
 
         $project->loadCount(['scenes', 'shots']);
 
@@ -133,7 +144,7 @@ class ProjectController extends Controller
         }
 
         $project->story = $story;
-        if ($style !== null) {
+        if ($style !== null && ! filled($project->style_prompt)) {
             $project->style = $style;
         }
         $project->script = $script;
@@ -178,7 +189,7 @@ class ProjectController extends Controller
         }
 
         $project->story = $story;
-        if ($style !== null) {
+        if ($style !== null && ! filled($project->style_prompt)) {
             $project->style = $style;
         }
         $project->screenplay = $screenplay;
@@ -215,7 +226,7 @@ class ProjectController extends Controller
         $existing = $project->episodes()->orderBy('episode_number')->get();
         if ($existing->count() >= 2) {
             $project->story = $story;
-            if ($style !== null) {
+            if ($style !== null && ! filled($project->style_prompt)) {
                 $project->style = $style;
             }
             $project->save();
@@ -240,7 +251,7 @@ class ProjectController extends Controller
         }
 
         $project->story = $story;
-        if ($style !== null) {
+        if ($style !== null && ! filled($project->style_prompt)) {
             $project->style = $style;
         }
         $project->save();
@@ -297,7 +308,7 @@ class ProjectController extends Controller
         if (mb_strlen(trim((string) $episode->screenplay)) >= 20) {
             $project->screenplay = $episode->screenplay;
             $project->current_step = 'screenplay';
-            if ($style !== null) {
+            if ($style !== null && ! filled($project->style_prompt)) {
                 $project->style = $style;
             }
             $project->save();
@@ -344,7 +355,7 @@ class ProjectController extends Controller
 
         $project->screenplay = $screenplay;
         $project->current_step = 'screenplay';
-        if ($style !== null) {
+        if ($style !== null && ! filled($project->style_prompt)) {
             $project->style = $style;
         }
         $project->save();
@@ -363,9 +374,10 @@ class ProjectController extends Controller
         GenerateScenesRequest $request,
         Project $project,
         ProjectTextGenerator $generator,
+        ProjectImageGenerator $images,
     ): JsonResponse {
         $this->authorizeProject($request, $project);
-        set_time_limit(180);
+        set_time_limit(300);
 
         $data = $request->validated();
         $screenplay = trim((string) ($data['screenplay'] ?? $project->screenplay ?? ''));
@@ -381,18 +393,19 @@ class ProjectController extends Controller
         $existing = $project->scenes()->orderBy('order_index')->get();
         if ($existing->isNotEmpty()) {
             $project->screenplay = $screenplay;
-            if ($style !== null) {
+            if ($style !== null && ! filled($project->style_prompt)) {
                 $project->style = $style;
             }
             $project->current_step = 'sceneboard';
             $project->save();
             $project->loadCount(['scenes', 'shots']);
             $project->setRelation('scenes', $existing);
+            $this->ensureProjectCover($project, $images);
 
             return response()->json([
                 'success' => true,
                 'scenes' => $existing->map(fn (Scene $scene) => $this->serializeScene($scene))->values(),
-                'project' => $this->detail($project),
+                'project' => $this->detail($project->fresh()),
             ]);
         }
 
@@ -407,7 +420,7 @@ class ProjectController extends Controller
         }
 
         $project->screenplay = $screenplay;
-        if ($style !== null) {
+        if ($style !== null && ! filled($project->style_prompt)) {
             $project->style = $style;
         }
         $project->current_step = 'sceneboard';
@@ -432,11 +445,12 @@ class ProjectController extends Controller
         $scenes = collect($created);
         $project->loadCount(['scenes', 'shots']);
         $project->setRelation('scenes', $scenes);
+        $this->ensureProjectCover($project, $images);
 
         return response()->json([
             'success' => true,
             'scenes' => $scenes->map(fn (Scene $scene) => $this->serializeScene($scene))->values(),
-            'project' => $this->detail($project),
+            'project' => $this->detail($project->fresh()),
         ]);
     }
 
@@ -461,7 +475,7 @@ class ProjectController extends Controller
 
         $existing = $project->characters()->orderBy('order_index')->get();
         if ($existing->isNotEmpty()) {
-            if ($style !== null) {
+            if ($style !== null && ! filled($project->style_prompt)) {
                 $project->style = $style;
             }
             $project->current_step = 'characters';
@@ -496,7 +510,7 @@ class ProjectController extends Controller
             return $this->generationFailed($e, $project);
         }
 
-        if ($style !== null) {
+        if ($style !== null && ! filled($project->style_prompt)) {
             $project->style = $style;
         }
         $project->current_step = 'characters';
@@ -553,7 +567,7 @@ class ProjectController extends Controller
 
         $existing = $project->environments()->orderBy('order_index')->get();
         if ($existing->isNotEmpty()) {
-            if ($style !== null) {
+            if ($style !== null && ! filled($project->style_prompt)) {
                 $project->style = $style;
             }
             $project->current_step = 'environments';
@@ -589,7 +603,7 @@ class ProjectController extends Controller
             return $this->generationFailed($e, $project);
         }
 
-        if ($style !== null) {
+        if ($style !== null && ! filled($project->style_prompt)) {
             $project->style = $style;
         }
         $project->current_step = 'environments';
@@ -645,7 +659,7 @@ class ProjectController extends Controller
 
         $existing = $project->shots()->orderBy('order_index')->with('scene')->get();
         if ($existing->isNotEmpty()) {
-            if ($style !== null) {
+            if ($style !== null && ! filled($project->style_prompt)) {
                 $project->style = $style;
             }
             $project->current_step = 'storyboard';
@@ -667,12 +681,16 @@ class ProjectController extends Controller
             'location' => $scene->location,
         ])->all();
 
+        $characters = $project->characters()->orderBy('order_index')->get();
+        $characterNames = $characters->pluck('name')->filter()->values()->all();
+
         try {
             $rows = $generator->shotsFromSequences(
                 $screenplay,
                 $sequences,
                 $style,
                 $this->sourceStory($project),
+                $characterNames,
             );
         } catch (GenerationFailedException $e) {
             return $this->generationFailed($e, $project);
@@ -681,7 +699,7 @@ class ProjectController extends Controller
         $scenesByNumber = $scenes->keyBy('scene_number');
         $environments = $project->environments()->orderBy('order_index')->get();
 
-        if ($style !== null) {
+        if ($style !== null && ! filled($project->style_prompt)) {
             $project->style = $style;
         }
         $project->current_step = 'storyboard';
@@ -705,7 +723,21 @@ class ProjectController extends Controller
                 $environmentId = $match?->id;
             }
 
-            $created[] = $project->shots()->create([
+            $castNames = $row['characters_in_shot'] ?? [];
+            $present = CharacterNameMatch::fromNames($characters, $castNames);
+            if ($present->isEmpty()) {
+                $present = CharacterNameMatch::fromHaystack(
+                    $characters,
+                    implode(' ', array_filter([
+                        $row['title'] ?? null,
+                        $row['description'] ?? null,
+                        $row['action'] ?? null,
+                        $row['dialogue'] ?? null,
+                    ]))
+                );
+            }
+
+            $shot = $project->shots()->create([
                 'scene_id' => $scene->id,
                 'environment_id' => $environmentId,
                 'shot_number' => (string) ($order + 1),
@@ -721,8 +753,17 @@ class ProjectController extends Controller
                 'mood' => $row['mood'],
                 'review_status' => 'draft',
                 'image_status' => 'none',
+                'storyboard_settings' => [
+                    'characters_in_shot' => $castNames,
+                    'extras' => $row['extras'] ?? 'none',
+                ],
             ]);
-            $created[array_key_last($created)]->setRelation('scene', $scene);
+            if ($present->isNotEmpty()) {
+                $shot->characters()->sync($present->pluck('id')->all());
+            }
+            $shot->setRelation('scene', $scene);
+            $shot->setRelation('characters', $present);
+            $created[] = $shot;
             $order++;
         }
 
@@ -741,6 +782,57 @@ class ProjectController extends Controller
             'success' => true,
             'shots' => $shots->map(fn (Shot $shot) => $this->serializeShot($shot))->values(),
             'project' => $this->detail($project),
+        ]);
+    }
+
+    public function updateCharacter(
+        UpdateCharacterRequest $request,
+        Project $project,
+        Character $character,
+    ): JsonResponse {
+        $this->authorizeProject($request, $project);
+        abort_unless($character->project_id === $project->id, 404);
+
+        $data = $request->validated();
+        if (array_key_exists('age', $data) && ! array_key_exists('age_range', $data)) {
+            $data['age_range'] = $data['age'];
+        }
+        unset($data['age']);
+
+        $character->fill($data);
+        $character->save();
+        $character->load('assets');
+
+        return response()->json([
+            'success' => true,
+            'character' => $this->serializeCharacter($character),
+        ]);
+    }
+
+    public function generateCover(
+        Request $request,
+        Project $project,
+        ProjectImageGenerator $images,
+    ): JsonResponse {
+        $this->authorizeProject($request, $project);
+        set_time_limit(180);
+
+        $force = $request->boolean('force');
+
+        try {
+            $result = $images->generateProjectCover($project, $force);
+        } catch (GenerationFailedException $e) {
+            return $this->generationFailed($e, $project);
+        }
+
+        $project->loadCount(['scenes', 'shots']);
+
+        return response()->json([
+            'success' => true,
+            'skipped' => $result['skipped'],
+            'generated' => $result['generated'],
+            'cover_image_url' => $result['url'],
+            'project' => $this->detail($project->fresh()),
         ]);
     }
 
@@ -859,6 +951,15 @@ class ProjectController extends Controller
         abort_unless($project->user_id === $request->user()->id, 404);
     }
 
+    private function ensureProjectCover(Project $project, ProjectImageGenerator $images): void
+    {
+        try {
+            $images->generateProjectCover($project);
+        } catch (\Throwable) {
+            // Sequences must still save if the cover image fails.
+        }
+    }
+
     private function sourceStory(Project $project): ?string
     {
         $story = trim((string) ($project->story ?? ''));
@@ -866,14 +967,122 @@ class ProjectController extends Controller
         return $story !== '' ? $story : null;
     }
 
-    private function styleFromRequest(array $data, Project $project): ?string
+    private function sceneCoverUrlForProject(Project $project): ?string
     {
-        $style = $data['style'] ?? $data['visual_style'] ?? null;
-        if (filled($style)) {
-            return trim((string) $style);
+        return $this->sceneCoverUrlsByProjectId([(int) $project->id])[(int) $project->id] ?? null;
+    }
+
+    /**
+     * @param  list<int|string>  $projectIds
+     * @return array<int, string>
+     */
+    private function sceneCoverUrlsByProjectId(array $projectIds): array
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $projectIds))));
+        if ($ids === []) {
+            return [];
         }
 
-        return filled($project->style) ? $project->style : null;
+        $rows = ShotImage::query()
+            ->select([
+                'shots.project_id',
+                'shot_images.image_url',
+            ])
+            ->join('shots', 'shots.id', '=', 'shot_images.shot_id')
+            ->join('scenes', 'scenes.id', '=', 'shots.scene_id')
+            ->whereIn('shots.project_id', $ids)
+            ->where('shot_images.status', 'completed')
+            ->whereNotNull('shot_images.image_url')
+            ->where('shot_images.image_url', '!=', '')
+            ->orderBy('scenes.order_index')
+            ->orderBy('shots.order_index')
+            ->orderByDesc('shot_images.is_approved')
+            ->orderByDesc('shot_images.version_number')
+            ->get();
+
+        $covers = [];
+        foreach ($rows as $row) {
+            $projectId = (int) $row->project_id;
+            if (! isset($covers[$projectId]) && filled($row->image_url)) {
+                $covers[$projectId] = $row->image_url;
+            }
+        }
+
+        return $covers;
+    }
+
+    private function styleFromRequest(array $data, Project $project): ?string
+    {
+        return $project->generationStylePrompt(
+            $data['style'] ?? $data['visual_style'] ?? null,
+        );
+    }
+
+    private function attachBundledStylePreview(Project $project): void
+    {
+        if (filled($project->style_reference_url)) {
+            return;
+        }
+
+        $variant = data_get($project->style_meta, 'variant');
+        if (! is_string($variant) || $variant === '' || $variant === 'custom') {
+            return;
+        }
+
+        $path = public_path('style-previews/'.$variant.'.png');
+        if (! is_file($path)) {
+            return;
+        }
+
+        $binary = file_get_contents($path);
+        if (! is_string($binary) || $binary === '') {
+            return;
+        }
+
+        $url = app(ProjectImageStore::class)->put(
+            (int) $project->id,
+            'style',
+            'reference',
+            $binary,
+            'image/png',
+        );
+
+        $project->style_reference_url = $url;
+        $project->save();
+    }
+
+    public function storeStyleReference(Request $request, Project $project, ProjectImageStore $store): JsonResponse
+    {
+        $this->authorizeProject($request, $project);
+
+        $validated = $request->validate([
+            'image' => ['required', 'file', 'image', 'mimes:jpeg,jpg,png,webp', 'max:8192'],
+        ]);
+
+        $file = $validated['image'];
+        $binary = file_get_contents($file->getRealPath());
+        if (! is_string($binary) || $binary === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'The style image could not be read.',
+            ], 422);
+        }
+
+        $url = $store->put(
+            (int) $project->id,
+            'style',
+            'reference',
+            $binary,
+            $file->getMimeType() ?: 'image/png',
+        );
+
+        $project->style_reference_url = $url;
+        $project->save();
+
+        return response()->json([
+            'success' => true,
+            'project' => $this->detail($project->fresh()),
+        ]);
     }
 
     private function attributesFromRequest(array $data): array
@@ -887,6 +1096,21 @@ class ProjectController extends Controller
         $style = $data['style'] ?? $data['visual_style'] ?? null;
         if (filled($style)) {
             $attributes['style'] = trim((string) $style);
+        }
+
+        if (array_key_exists('style_prompt', $data)) {
+            $prompt = $data['style_prompt'];
+            $attributes['style_prompt'] = filled($prompt) ? trim((string) $prompt) : null;
+        }
+
+        if (array_key_exists('style_meta', $data)) {
+            $attributes['style_meta'] = is_array($data['style_meta']) ? $data['style_meta'] : null;
+        }
+
+        if (array_key_exists('style_reference_url', $data)) {
+            $attributes['style_reference_url'] = filled($data['style_reference_url'])
+                ? trim((string) $data['style_reference_url'])
+                : null;
         }
 
         $story = $data['story'] ?? $data['story_text'] ?? null;
@@ -903,7 +1127,7 @@ class ProjectController extends Controller
         return $attributes;
     }
 
-    private function summary(Project $project): array
+    private function summary(Project $project, ?string $sceneCoverUrl = null): array
     {
         $story = $project->story ?? '';
 
@@ -915,7 +1139,9 @@ class ProjectController extends Controller
             'style' => $project->style,
             'current_step' => $project->current_step,
             'status' => $project->status,
-            'cover_image_url' => $project->cover_image_url,
+            'cover_image_url' => $project->cover_image_url
+                ?: $sceneCoverUrl
+                ?: $project->style_reference_url,
             'scenes_count' => $project->scenes_count ?? 0,
             'shots_count' => $project->shots_count ?? 0,
             'generated_images_count' => 0,
@@ -935,11 +1161,17 @@ class ProjectController extends Controller
             'screenplay' => $project->screenplay,
             'style' => $style,
             'visual_style' => $style,
+            'style_prompt' => $project->style_prompt,
+            'style_meta' => $project->style_meta,
+            'style_reference_url' => $project->style_reference_url,
             'current_step' => $project->current_step,
             'status' => $project->status,
-            'cover_image_url' => $project->cover_image_url,
+            'cover_image_url' => $project->cover_image_url ?: $this->sceneCoverUrlForProject($project),
             'meta' => [
                 'visual_style' => $style,
+                'style_prompt' => $project->style_prompt,
+                'style_meta' => $project->style_meta,
+                'style_reference_url' => $project->style_reference_url,
             ],
             'scenes' => $this->serializeScenes($project),
             'shots' => $this->serializeShots($project),

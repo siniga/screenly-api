@@ -397,12 +397,19 @@ PROMPT;
 
     /**
      * @param  list<array{scene_number?: int, title?: string, description?: string, location?: string}>  $sequences
-     * @return list<array{scene_number: int, title: string, description: ?string, action: ?string, dialogue: ?string, shot_size: ?string, camera_angle: ?string, camera_movement: ?string, lighting: ?string, mood: ?string, environment: ?string}>
+     * @param  list<string>  $characterNames
+     * @return list<array{scene_number: int, title: string, description: ?string, action: ?string, dialogue: ?string, shot_size: ?string, camera_angle: ?string, camera_movement: ?string, lighting: ?string, mood: ?string, environment: ?string, characters_in_shot: list<string>, extras: ?string}>
      */
-    public function shotsFromSequences(string $screenplay, array $sequences, ?string $style = null, ?string $sourceStory = null): array
-    {
+    public function shotsFromSequences(
+        string $screenplay,
+        array $sequences,
+        ?string $style = null,
+        ?string $sourceStory = null,
+        array $characterNames = [],
+    ): array {
         $styleLine = $this->styleLine($style);
         $sequenceBlock = $this->numberedSequenceContext($sequences);
+        $castBlock = $this->castContext($characterNames);
         $fidelity = $this->fidelityRules('screenplay and sequences');
         $storyLock = $this->sourceStoryBlock($sourceStory);
 
@@ -414,15 +421,20 @@ Rules:
 {$fidelity}
 - Create only as many shots as needed to show the action already in that sequence (usually 2-6). Do not add extra beats.
 - Every sequence listed must have at least one shot. Use that sequence's scene_number.
-- title: short shot title from what happens.
-- description: what we already see in that beat.
-- action: the action already written. No new business.
+- title: short shot title from what happens. Name who is on screen.
+- description: what we already see in that beat. Name who is visible.
+- action: copy the beat already written. Name who is visible, what they are doing, where they look, and how they stand. No new business. Do not change the story.
 - dialogue: copy a spoken line only if it already exists; otherwise omit.
-- shot_size, camera_angle, camera_movement: coverage only. These must not change the story.
+- shot_size: CLOSE-UP, MEDIUM CLOSE-UP, MEDIUM, WIDE, or EXTREME WIDE. No fisheye.
+- camera_angle: EYE LEVEL, HIGH, LOW, or OVERHEAD. No Dutch tilt unless the screenplay requires it. Keep the horizon level.
+- camera_movement: STATIC unless the action requires movement.
 - lighting, mood, environment: from the sequence/screenplay only.
+- characters_in_shot: array of exact CAST names visible in THIS frame. Empty if nobody is on screen. Never list someone who is off-camera.
+- extras: "none" unless this beat already has a crowd. Extras are unrecognizable background figures, not looking at camera, not in CAST.
 - Output JSON only: {"shots":[...]} with scene_number and those keys on each shot.
 {$styleLine}
 {$storyLock}
+{$castBlock}
 {$sequenceBlock}
 
 SCREENPLAY:
@@ -461,6 +473,10 @@ PROMPT;
                 'lighting' => $this->nullableString($row['lighting'] ?? null),
                 'mood' => $this->nullableString($row['mood'] ?? null),
                 'environment' => $this->nullableString($row['environment'] ?? $row['location'] ?? null),
+                'characters_in_shot' => $this->stringList(
+                    $row['characters_in_shot'] ?? $row['charactersInShot'] ?? $row['characters'] ?? []
+                ),
+                'extras' => $this->nullableString($row['extras'] ?? null) ?? 'none',
             ];
         }
 
@@ -531,6 +547,27 @@ PROMPT;
     }
 
     /**
+     * @param  list<string>  $characterNames
+     */
+    private function castContext(array $characterNames): string
+    {
+        $lines = '';
+        foreach ($characterNames as $name) {
+            $trimmed = trim((string) $name);
+            if ($trimmed === '') {
+                continue;
+            }
+            $lines .= "- {$trimmed}\n";
+        }
+
+        if ($lines === '') {
+            return '';
+        }
+
+        return "CAST (use these exact names in characters_in_shot):\n{$lines}";
+    }
+
+    /**
      * @param  list<array{scene_number?: int, title?: string, description?: string, location?: string}>  $sequences
      */
     private function numberedSequenceContext(array $sequences): string
@@ -588,9 +625,17 @@ RULES;
     {
         $trimmed = trim((string) $style);
 
-        return $trimmed !== ''
-            ? "Visual style (look only, not story): {$trimmed}. Do not use style to add plot, characters, or dialogue."
-            : '';
+        if ($trimmed === '') {
+            return '';
+        }
+
+        $cartoonLock = str_contains(strtolower($trimmed), 'cartoon')
+            || str_contains(strtolower($trimmed), 'strict visual lock');
+        $lookRule = $cartoonLock
+            ? 'Describe people, clothes, and places as they would appear in this visual style, not as live-action photography.'
+            : 'Use the visual style only as look/atmosphere.';
+
+        return "Visual style (look only, not story): {$trimmed}. {$lookRule} Do not use style to add plot, characters, or dialogue.";
     }
 
     private function nullableString(mixed $value): ?string
@@ -598,5 +643,30 @@ RULES;
         $trimmed = trim((string) $value);
 
         return $trimmed !== '' ? $trimmed : null;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function stringList(mixed $value): array
+    {
+        if (is_string($value)) {
+            $value = preg_split('/[,;]+/', $value) ?: [];
+        }
+
+        if (! is_array($value)) {
+            return [];
+        }
+
+        $names = [];
+        foreach ($value as $item) {
+            $trimmed = trim((string) $item);
+            if ($trimmed === '') {
+                continue;
+            }
+            $names[] = $trimmed;
+        }
+
+        return array_values(array_unique($names));
     }
 }

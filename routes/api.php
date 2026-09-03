@@ -20,6 +20,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/projects', [ProjectController::class, 'index']);
     Route::post('/projects', [ProjectController::class, 'store']);
+    Route::post('/projects/{project}/style-reference', [ProjectController::class, 'storeStyleReference']);
     Route::get('/projects/{project}', [ProjectController::class, 'show']);
     Route::put('/projects/{project}', [ProjectController::class, 'update']);
     Route::patch('/projects/{project}', [ProjectController::class, 'update']);
@@ -35,6 +36,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/projects/{project}/generate-characters', [ProjectController::class, 'generateCharacters']);
     Route::post('/projects/{project}/generate-environments', [ProjectController::class, 'generateEnvironments']);
     Route::post('/projects/{project}/generate-shots', [ProjectController::class, 'generateShots']);
+    Route::post('/projects/{project}/generate-cover', [ProjectController::class, 'generateCover']);
+    Route::patch('/projects/{project}/characters/{character}', [ProjectController::class, 'updateCharacter']);
+    Route::put('/projects/{project}/characters/{character}', [ProjectController::class, 'updateCharacter']);
     Route::post('/projects/{project}/characters/{character}/generate-image', [ProjectController::class, 'generateCharacterImage']);
     Route::post('/projects/{project}/characters/{character}/generate-costume', [ProjectController::class, 'generateCharacterCostume']);
     Route::post('/projects/{project}/environments/{environment}/generate-image', [ProjectController::class, 'generateEnvironmentImage']);

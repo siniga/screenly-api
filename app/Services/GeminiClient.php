@@ -46,7 +46,7 @@ class GeminiClient
         );
 
         $parts = [['text' => $prompt]];
-        foreach (array_slice($references, 0, 3) as $reference) {
+        foreach (array_slice($references, 0, 4) as $reference) {
             $binary = $reference['binary'] ?? '';
             if ($binary === '') {
                 continue;

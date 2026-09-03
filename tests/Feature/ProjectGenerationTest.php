@@ -164,25 +164,28 @@ class ProjectGenerationTest extends TestCase
 
     public function test_generate_scenes_saves_gemini_rows_on_the_project(): void
     {
+        Storage::fake('public');
         Http::fake([
-            'generativelanguage.googleapis.com/*' => Http::response($this->geminiResponse(json_encode([
-                'scenes' => [
-                    [
-                        'title' => 'Kitchen wait',
-                        'location' => 'KITCHEN',
-                        'time_of_day' => 'NIGHT',
-                        'description' => 'A man waits until someone knocks.',
-                        'mood' => 'Tense',
+            'generativelanguage.googleapis.com/*' => Http::sequence()
+                ->push($this->geminiResponse(json_encode([
+                    'scenes' => [
+                        [
+                            'title' => 'Kitchen wait',
+                            'location' => 'KITCHEN',
+                            'time_of_day' => 'NIGHT',
+                            'description' => 'A man waits until someone knocks.',
+                            'mood' => 'Tense',
+                        ],
+                        [
+                            'title' => 'The door',
+                            'location' => 'HALLWAY',
+                            'time_of_day' => 'NIGHT',
+                            'description' => 'He opens the door.',
+                            'mood' => 'Uneasy',
+                        ],
                     ],
-                    [
-                        'title' => 'The door',
-                        'location' => 'HALLWAY',
-                        'time_of_day' => 'NIGHT',
-                        'description' => 'He opens the door.',
-                        'mood' => 'Uneasy',
-                    ],
-                ],
-            ], JSON_THROW_ON_ERROR))),
+                ], JSON_THROW_ON_ERROR)))
+                ->push($this->geminiImageResponse()),
         ]);
 
         $user = User::factory()->create();
@@ -199,12 +202,17 @@ class ProjectGenerationTest extends TestCase
             ->assertJsonPath('success', true)
             ->assertJsonPath('project.current_step', 'sceneboard')
             ->assertJsonPath('scenes.0.title', 'Kitchen wait')
-            ->assertJsonPath('scenes.1.location', 'HALLWAY');
+            ->assertJsonPath('scenes.1.location', 'HALLWAY')
+            ->assertJsonPath('project.cover_image_url', "/storage/projects/{$project->id}/cover/poster.png");
 
         $this->assertDatabaseHas('scenes', [
             'project_id' => $project->id,
             'scene_number' => 1,
             'title' => 'Kitchen wait',
+        ]);
+        $this->assertDatabaseHas('projects', [
+            'id' => $project->id,
+            'cover_image_url' => "/storage/projects/{$project->id}/cover/poster.png",
         ]);
         $this->assertDatabaseCount('scenes', 2);
     }
@@ -217,6 +225,7 @@ class ProjectGenerationTest extends TestCase
         $project = $this->projectFor($user, [
             'screenplay' => "FADE IN\n\nINT. KITCHEN - NIGHT\n\nA MAN waits until someone knocks on the door.",
             'current_step' => 'screenplay',
+            'cover_image_url' => '/storage/covers/existing.png',
         ]);
         $project->scenes()->create([
             'scene_number' => 1,
@@ -421,6 +430,79 @@ class ProjectGenerationTest extends TestCase
         ]);
     }
 
+    public function test_generate_shots_syncs_only_characters_in_the_shot(): void
+    {
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($this->geminiResponse(json_encode([
+                'shots' => [
+                    [
+                        'scene_number' => 1,
+                        'title' => 'Chloe waits',
+                        'description' => 'Chloe sits at the table.',
+                        'action' => 'Chloe looks at the door.',
+                        'shot_size' => 'MEDIUM',
+                        'camera_angle' => 'EYE LEVEL',
+                        'camera_movement' => 'STATIC',
+                        'characters_in_shot' => ['Chloe'],
+                        'extras' => 'none',
+                    ],
+                ],
+            ], JSON_THROW_ON_ERROR))),
+        ]);
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user, [
+            'screenplay' => "FADE IN\n\nINT. KITCHEN - NIGHT\n\nCHLOE waits. MARCO is outside.",
+            'current_step' => 'environments',
+        ]);
+        $project->scenes()->create([
+            'scene_number' => 1,
+            'order_index' => 0,
+            'title' => 'Kitchen wait',
+            'location' => 'KITCHEN',
+            'status' => 'completed',
+        ]);
+        $chloe = $project->characters()->create([
+            'order_index' => 0,
+            'name' => 'Chloe',
+            'image_status' => 'none',
+        ]);
+        $marco = $project->characters()->create([
+            'order_index' => 1,
+            'name' => 'Marco',
+            'image_status' => 'none',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/generate-shots")
+            ->assertOk()
+            ->assertJsonPath('shots.0.title', 'Chloe waits');
+
+        Http::assertSent(function ($request) {
+            $text = (string) data_get($request->data(), 'contents.0.parts.0.text', '');
+            $this->assertStringContainsString('characters_in_shot', $text);
+            $this->assertStringContainsString('Chloe', $text);
+            $this->assertStringContainsString('Marco', $text);
+            $this->assertStringContainsString('No Dutch tilt', $text);
+
+            return true;
+        });
+
+        $shot = $project->shots()->first();
+        $this->assertNotNull($shot);
+        $this->assertDatabaseHas('shot_character', [
+            'shot_id' => $shot->id,
+            'character_id' => $chloe->id,
+        ]);
+        $this->assertDatabaseMissing('shot_character', [
+            'shot_id' => $shot->id,
+            'character_id' => $marco->id,
+        ]);
+        $this->assertSame(['Chloe'], $shot->storyboard_settings['characters_in_shot'] ?? null);
+        $this->assertSame('none', $shot->storyboard_settings['extras'] ?? null);
+    }
+
     public function test_generate_character_image_saves_a_portrait(): void
     {
         Storage::fake('public');
@@ -485,6 +567,50 @@ class ProjectGenerationTest extends TestCase
             ->assertJsonPath('skipped', true);
 
         Http::assertNothingSent();
+    }
+
+    public function test_update_character_saves_portrait_fields(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->projectFor($user);
+        $character = $project->characters()->create([
+            'order_index' => 0,
+            'name' => 'The Waiter',
+            'role' => 'supporting',
+            'gender' => 'male',
+            'age_range' => '30s',
+            'ethnicity' => 'European',
+            'appearance' => 'Tired man in a grey shirt',
+            'wardrobe' => 'Grey shirt',
+            'description' => 'Works the night shift.',
+            'image_status' => 'completed',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->patchJson("/api/projects/{$project->id}/characters/{$character->id}", [
+            'role' => 'protagonist',
+            'gender' => 'Male',
+            'age' => '50s',
+            'ethnicity' => 'East African',
+            'appearance' => 'Older man with a white beard',
+            'wardrobe' => 'Faded military jacket',
+            'description' => 'A tired lead who still shows up.',
+        ])
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('character.role', 'protagonist')
+            ->assertJsonPath('character.gender', 'Male')
+            ->assertJsonPath('character.age_range', '50s')
+            ->assertJsonPath('character.age', '50s')
+            ->assertJsonPath('character.ethnicity', 'East African')
+            ->assertJsonPath('character.appearance', 'Older man with a white beard')
+            ->assertJsonPath('character.wardrobe', 'Faded military jacket');
+
+        $character->refresh();
+        $this->assertSame('protagonist', $character->role);
+        $this->assertSame('50s', $character->age_range);
+        $this->assertSame('East African', $character->ethnicity);
     }
 
     public function test_generate_shot_image_saves_a_still(): void
@@ -894,11 +1020,278 @@ class ProjectGenerationTest extends TestCase
 
             $this->assertStringContainsString('costume sheets', $text);
             $this->assertStringContainsString('MUST WEAR: Grey coat', $text);
+            $this->assertStringContainsString('exactly 1', $text);
+            $this->assertStringContainsString('ACTION IS THE ONLY SOURCE FOR STAGING', $text);
+            $this->assertStringContainsString('Do not overlap bodies', $text);
+            $this->assertStringContainsString('Nobody looks into the lens', $text);
+            $this->assertStringContainsString('Do not change the story', $text);
             $this->assertStringContainsString('Do not copy a previous storyboard location', $text);
             $this->assertTrue($inline->contains(base64_encode('costume-sheet-bytes')));
+            $this->assertTrue($inline->contains(base64_encode('environment-plate-bytes')));
             $this->assertFalse($inline->contains(base64_encode('portrait-bytes')));
             $this->assertFalse($inline->contains(base64_encode('previous-still-bytes')));
-            $this->assertFalse($inline->contains(base64_encode('environment-plate-bytes')));
+
+            return true;
+        });
+    }
+
+    public function test_generate_shot_image_does_not_attach_offscreen_characters(): void
+    {
+        Storage::fake('public');
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($this->geminiImageResponse()),
+        ]);
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user, ['current_step' => 'storyboard']);
+        $chloe = $project->characters()->create([
+            'order_index' => 0,
+            'name' => 'Chloe',
+            'wardrobe' => 'Grey coat',
+            'image_status' => 'completed',
+        ]);
+        $marco = $project->characters()->create([
+            'order_index' => 1,
+            'name' => 'Marco',
+            'wardrobe' => 'Blue jacket',
+            'image_status' => 'completed',
+        ]);
+
+        $chloeCostume = "projects/{$project->id}/characters/{$chloe->id}-costume.png";
+        Storage::disk('public')->put($chloeCostume, 'chloe-costume-bytes');
+        $chloe->assets()->create([
+            'asset_type' => 'costume',
+            'title' => 'Chloe costume',
+            'image_url' => '/storage/'.$chloeCostume,
+            'is_primary' => false,
+            'status' => 'completed',
+        ]);
+
+        $marcoCostume = "projects/{$project->id}/characters/{$marco->id}-costume.png";
+        Storage::disk('public')->put($marcoCostume, 'marco-costume-bytes');
+        $marco->assets()->create([
+            'asset_type' => 'costume',
+            'title' => 'Marco costume',
+            'image_url' => '/storage/'.$marcoCostume,
+            'is_primary' => false,
+            'status' => 'completed',
+        ]);
+
+        $scene = $project->scenes()->create([
+            'scene_number' => 1,
+            'order_index' => 0,
+            'title' => 'Kitchen wait',
+            'status' => 'completed',
+        ]);
+        $shot = $project->shots()->create([
+            'scene_id' => $scene->id,
+            'shot_number' => '1',
+            'order_index' => 0,
+            'title' => 'Chloe walks outside',
+            'action' => 'Chloe steps onto the street.',
+            'image_status' => 'none',
+            'storyboard_settings' => [
+                'characters_in_shot' => ['Chloe'],
+                'extras' => 'none',
+            ],
+        ]);
+        $shot->characters()->attach($chloe->id);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/shots/{$shot->id}/generate-image")
+            ->assertOk()
+            ->assertJsonPath('success', true);
+
+        Http::assertSent(function ($request) {
+            $parts = data_get($request->data(), 'contents.0.parts', []);
+            $text = collect($parts)->pluck('text')->filter()->implode("\n");
+            $inline = collect($parts)
+                ->map(fn ($part) => data_get($part, 'inlineData.data') ?? data_get($part, 'inline_data.data'))
+                ->filter()
+                ->values();
+
+            $this->assertStringContainsString('exactly 1 — Chloe', $text);
+            $this->assertStringContainsString('Place them only as Action describes', $text);
+            $this->assertStringContainsString('Do not include these project characters at all: Marco', $text);
+            $this->assertStringContainsString('MUST WEAR: Grey coat', $text);
+            $this->assertStringNotContainsString('MUST WEAR: Blue jacket', $text);
+            $this->assertTrue($inline->contains(base64_encode('chloe-costume-bytes')));
+            $this->assertFalse($inline->contains(base64_encode('marco-costume-bytes')));
+
+            return true;
+        });
+    }
+
+    public function test_generate_character_image_locks_cartoon_style_and_attaches_reference(): void
+    {
+        Storage::fake('public');
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($this->geminiImageResponse()),
+        ]);
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user, [
+            'style' => 'Cartoon · 2D · Comic book',
+            'style_prompt' => 'Strict visual lock: American comic-book illustration.',
+            'style_meta' => [
+                'family' => 'cartoon',
+                'medium' => '2d',
+                'variant' => 'comic_book',
+            ],
+        ]);
+        $stylePath = "projects/{$project->id}/style/reference.png";
+        Storage::disk('public')->put($stylePath, 'style-ref-bytes');
+        $project->style_reference_url = '/storage/'.$stylePath;
+        $project->save();
+
+        $character = $project->characters()->create([
+            'order_index' => 0,
+            'name' => 'The Waiter',
+            'appearance' => 'Tired man in a grey shirt',
+            'image_status' => 'pending',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/characters/{$character->id}/generate-image")
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('skipped', false);
+
+        Http::assertSent(function ($request) {
+            $parts = data_get($request->data(), 'contents.0.parts', []);
+            $text = collect($parts)->pluck('text')->filter()->implode("\n");
+            $inline = collect($parts)
+                ->map(fn ($part) => data_get($part, 'inlineData.data') ?? data_get($part, 'inline_data.data'))
+                ->filter()
+                ->values();
+
+            $this->assertStringContainsString('locked cartoon style', $text);
+            $this->assertStringContainsString('American comic-book illustration', $text);
+            $this->assertStringContainsString('STYLE LOCK', $text);
+            $this->assertTrue($inline->contains(base64_encode('style-ref-bytes')));
+
+            return true;
+        });
+    }
+
+    public function test_generate_cover_saves_the_image_on_the_project(): void
+    {
+        Storage::fake('public');
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($this->geminiImageResponse()),
+        ]);
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user, [
+            'title' => 'Harbor Night',
+            'story' => 'A man waits in a quiet kitchen until someone knocks on the door.',
+            'screenplay' => "FADE IN\n\nINT. KITCHEN - NIGHT\n\nA MAN waits.",
+        ]);
+        $project->scenes()->create([
+            'scene_number' => 1,
+            'order_index' => 0,
+            'title' => 'Kitchen wait',
+            'location' => 'Kitchen',
+            'time_of_day' => 'Night',
+            'status' => 'completed',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/generate-cover")
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('skipped', false)
+            ->assertJsonPath('generated', true)
+            ->assertJsonPath('cover_image_url', "/storage/projects/{$project->id}/cover/poster.png")
+            ->assertJsonPath('project.cover_image_url', "/storage/projects/{$project->id}/cover/poster.png");
+
+        $this->assertDatabaseHas('projects', [
+            'id' => $project->id,
+            'cover_image_url' => "/storage/projects/{$project->id}/cover/poster.png",
+        ]);
+        $this->assertTrue(
+            Storage::disk('public')->exists("projects/{$project->id}/cover/poster.png")
+        );
+
+        Http::assertSent(function ($request) {
+            $parts = data_get($request->data(), 'contents.0.parts', []);
+            $text = collect($parts)->pluck('text')->filter()->implode("\n");
+
+            $this->assertStringContainsString('key-art still', $text);
+            $this->assertStringContainsString('Harbor Night', $text);
+            $this->assertStringContainsString('Kitchen wait', $text);
+            $this->assertStringContainsString('A man waits in a quiet kitchen', $text);
+
+            return true;
+        });
+    }
+
+    public function test_generate_cover_skips_when_a_cover_already_exists(): void
+    {
+        Storage::fake('public');
+        Http::fake();
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user, [
+            'cover_image_url' => '/storage/projects/1/cover/poster.png',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/generate-cover")
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('skipped', true)
+            ->assertJsonPath('generated', false)
+            ->assertJsonPath('cover_image_url', '/storage/projects/1/cover/poster.png');
+
+        Http::assertNothingSent();
+    }
+
+    public function test_generate_cover_locks_cartoon_style_and_attaches_reference(): void
+    {
+        Storage::fake('public');
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($this->geminiImageResponse()),
+        ]);
+
+        $user = User::factory()->create();
+        $project = $this->projectFor($user, [
+            'style' => 'Cartoon · 2D · Comic book',
+            'style_prompt' => 'Strict visual lock: American comic-book illustration.',
+            'style_meta' => [
+                'family' => 'cartoon',
+                'medium' => '2d',
+                'variant' => 'comic_book',
+            ],
+        ]);
+        $stylePath = "projects/{$project->id}/style/reference.png";
+        Storage::disk('public')->put($stylePath, 'style-ref-bytes');
+        $project->style_reference_url = '/storage/'.$stylePath;
+        $project->save();
+
+        Sanctum::actingAs($user);
+
+        $this->postJson("/api/projects/{$project->id}/generate-cover")
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('skipped', false);
+
+        Http::assertSent(function ($request) {
+            $parts = data_get($request->data(), 'contents.0.parts', []);
+            $text = collect($parts)->pluck('text')->filter()->implode("\n");
+            $inline = collect($parts)
+                ->map(fn ($part) => data_get($part, 'inlineData.data') ?? data_get($part, 'inline_data.data'))
+                ->filter()
+                ->values();
+
+            $this->assertStringContainsString('locked cartoon style', $text);
+            $this->assertStringContainsString('American comic-book illustration', $text);
+            $this->assertStringContainsString('STYLE LOCK', $text);
+            $this->assertTrue($inline->contains(base64_encode('style-ref-bytes')));
 
             return true;
         });
