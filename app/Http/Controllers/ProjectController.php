@@ -374,10 +374,9 @@ class ProjectController extends Controller
         GenerateScenesRequest $request,
         Project $project,
         ProjectTextGenerator $generator,
-        ProjectImageGenerator $images,
     ): JsonResponse {
         $this->authorizeProject($request, $project);
-        set_time_limit(300);
+        set_time_limit(180);
 
         $data = $request->validated();
         $screenplay = trim((string) ($data['screenplay'] ?? $project->screenplay ?? ''));
@@ -400,12 +399,11 @@ class ProjectController extends Controller
             $project->save();
             $project->loadCount(['scenes', 'shots']);
             $project->setRelation('scenes', $existing);
-            $this->ensureProjectCover($project, $images);
 
             return response()->json([
                 'success' => true,
                 'scenes' => $existing->map(fn (Scene $scene) => $this->serializeScene($scene))->values(),
-                'project' => $this->detail($project->fresh()),
+                'project' => $this->detail($project),
             ]);
         }
 
@@ -445,12 +443,11 @@ class ProjectController extends Controller
         $scenes = collect($created);
         $project->loadCount(['scenes', 'shots']);
         $project->setRelation('scenes', $scenes);
-        $this->ensureProjectCover($project, $images);
 
         return response()->json([
             'success' => true,
             'scenes' => $scenes->map(fn (Scene $scene) => $this->serializeScene($scene))->values(),
-            'project' => $this->detail($project->fresh()),
+            'project' => $this->detail($project),
         ]);
     }
 
@@ -949,15 +946,6 @@ class ProjectController extends Controller
     private function authorizeProject(Request $request, Project $project): void
     {
         abort_unless($project->user_id === $request->user()->id, 404);
-    }
-
-    private function ensureProjectCover(Project $project, ProjectImageGenerator $images): void
-    {
-        try {
-            $images->generateProjectCover($project);
-        } catch (\Throwable) {
-            // Sequences must still save if the cover image fails.
-        }
     }
 
     private function sourceStory(Project $project): ?string

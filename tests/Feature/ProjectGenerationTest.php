@@ -164,28 +164,25 @@ class ProjectGenerationTest extends TestCase
 
     public function test_generate_scenes_saves_gemini_rows_on_the_project(): void
     {
-        Storage::fake('public');
         Http::fake([
-            'generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push($this->geminiResponse(json_encode([
-                    'scenes' => [
-                        [
-                            'title' => 'Kitchen wait',
-                            'location' => 'KITCHEN',
-                            'time_of_day' => 'NIGHT',
-                            'description' => 'A man waits until someone knocks.',
-                            'mood' => 'Tense',
-                        ],
-                        [
-                            'title' => 'The door',
-                            'location' => 'HALLWAY',
-                            'time_of_day' => 'NIGHT',
-                            'description' => 'He opens the door.',
-                            'mood' => 'Uneasy',
-                        ],
+            'generativelanguage.googleapis.com/*' => Http::response($this->geminiResponse(json_encode([
+                'scenes' => [
+                    [
+                        'title' => 'Kitchen wait',
+                        'location' => 'KITCHEN',
+                        'time_of_day' => 'NIGHT',
+                        'description' => 'A man waits until someone knocks.',
+                        'mood' => 'Tense',
                     ],
-                ], JSON_THROW_ON_ERROR)))
-                ->push($this->geminiImageResponse()),
+                    [
+                        'title' => 'The door',
+                        'location' => 'HALLWAY',
+                        'time_of_day' => 'NIGHT',
+                        'description' => 'He opens the door.',
+                        'mood' => 'Uneasy',
+                    ],
+                ],
+            ], JSON_THROW_ON_ERROR))),
         ]);
 
         $user = User::factory()->create();
@@ -202,17 +199,12 @@ class ProjectGenerationTest extends TestCase
             ->assertJsonPath('success', true)
             ->assertJsonPath('project.current_step', 'sceneboard')
             ->assertJsonPath('scenes.0.title', 'Kitchen wait')
-            ->assertJsonPath('scenes.1.location', 'HALLWAY')
-            ->assertJsonPath('project.cover_image_url', "/storage/projects/{$project->id}/cover/poster.png");
+            ->assertJsonPath('scenes.1.location', 'HALLWAY');
 
         $this->assertDatabaseHas('scenes', [
             'project_id' => $project->id,
             'scene_number' => 1,
             'title' => 'Kitchen wait',
-        ]);
-        $this->assertDatabaseHas('projects', [
-            'id' => $project->id,
-            'cover_image_url' => "/storage/projects/{$project->id}/cover/poster.png",
         ]);
         $this->assertDatabaseCount('scenes', 2);
     }
@@ -225,7 +217,6 @@ class ProjectGenerationTest extends TestCase
         $project = $this->projectFor($user, [
             'screenplay' => "FADE IN\n\nINT. KITCHEN - NIGHT\n\nA MAN waits until someone knocks on the door.",
             'current_step' => 'screenplay',
-            'cover_image_url' => '/storage/covers/existing.png',
         ]);
         $project->scenes()->create([
             'scene_number' => 1,
@@ -1000,6 +991,7 @@ class ProjectGenerationTest extends TestCase
             'order_index' => 1,
             'title' => 'Chloe walks outside',
             'action' => 'Chloe steps onto the street.',
+            'dialogue' => 'Wait for me at the corner.',
             'image_status' => 'none',
         ]);
 
@@ -1026,6 +1018,12 @@ class ProjectGenerationTest extends TestCase
             $this->assertStringContainsString('Nobody looks into the lens', $text);
             $this->assertStringContainsString('Do not change the story', $text);
             $this->assertStringContainsString('Do not copy a previous storyboard location', $text);
+            $this->assertStringContainsString('no captions', $text);
+            $this->assertStringContainsString('no subtitles', $text);
+            $this->assertStringContainsString('Fill every pixel of the 16:9 canvas', $text);
+            $this->assertStringContainsString('Dialogue is not part of this picture', $text);
+            $this->assertStringNotContainsString('Dialogue:', $text);
+            $this->assertStringNotContainsString('Wait for me at the corner.', $text);
             $this->assertTrue($inline->contains(base64_encode('costume-sheet-bytes')));
             $this->assertTrue($inline->contains(base64_encode('environment-plate-bytes')));
             $this->assertFalse($inline->contains(base64_encode('portrait-bytes')));
@@ -1224,6 +1222,10 @@ class ProjectGenerationTest extends TestCase
             $this->assertStringContainsString('Harbor Night', $text);
             $this->assertStringContainsString('Kitchen wait', $text);
             $this->assertStringContainsString('A man waits in a quiet kitchen', $text);
+            $this->assertStringContainsString('no captions', $text);
+            $this->assertStringContainsString('no subtitles', $text);
+            $this->assertStringContainsString('Fill every pixel of the 16:9 canvas', $text);
+            $this->assertStringContainsString('do not paint this as text', $text);
 
             return true;
         });

@@ -592,6 +592,17 @@ class ProjectImageGenerator
         return $lines;
     }
 
+    private function pictureIntegrityLines(): array
+    {
+        return [
+            'PICTURE LOCK - ABSOLUTE:',
+            'Output one finished picture only. The picture is the entire canvas.',
+            'Fill the frame edge to edge. No letterboxing, no pillarboxing, no black bars, no white bars, no borders, no frames, no mattes, no padding, no strip lines, no film rebate, no collage, no split screen, no UI chrome.',
+            'No text of any kind: no captions, no subtitles, no titles, no credits, no logos, no watermarks, no labels, no numbers, no speech bubbles, no closed captions, no lower-thirds, no title cards.',
+            'Nothing overlaid on the picture. No graphics, no stickers, no comic balloons, no burned-in dialogue.',
+        ];
+    }
+
     private function characterPrompt(Character $character, Project $project): string
     {
         $illustrated = $project->isIllustratedStyle();
@@ -601,7 +612,7 @@ class ProjectImageGenerator
                 ? 'Create a single character portrait in the '.$look.'.'
                 : 'Create a single photorealistic character portrait for a film.',
             'One person only, facing camera, chest-up, plain studio backdrop.',
-            'No text, no watermark, no collage, no split frames.',
+            ...$this->pictureIntegrityLines(),
             '',
             ...$this->styleLockLines($project),
             '',
@@ -635,7 +646,7 @@ class ProjectImageGenerator
                 : 'Create a single photorealistic full-body costume sheet for a film character.',
             'One person only, standing, facing camera, head to shoes visible, plain studio backdrop.',
             'Show the complete outfit: top, bottom, shoes, bag, jewelry, and any accessories.',
-            'No text, no watermark, no collage, no split frames.',
+            ...$this->pictureIntegrityLines(),
             'If a portrait is attached, copy that exact face and hair. This is a wardrobe bible, not a scene.',
             '',
             ...$this->styleLockLines($project),
@@ -672,7 +683,8 @@ class ProjectImageGenerator
             $illustrated
                 ? 'Create a single empty location plate in the '.$look.'.'
                 : 'Create a single photorealistic empty location plate for a film.',
-            'No people, no text, no watermark, no collage, no split frames.',
+            'No people in the frame.',
+            ...$this->pictureIntegrityLines(),
             '',
             ...$this->styleLockLines($project),
             '',
@@ -709,7 +721,8 @@ class ProjectImageGenerator
                 ? 'Create a single 16:9 key-art still for a film project cover in the '.$look.'.'
                 : 'Create a single 16:9 cinematic key-art still for a film project cover.',
             'One wide establishing image of the story world. Poster-like, not a character sheet, not a collage, not a split frame.',
-            'No title text, no credits, no watermark, no logo, no captions.',
+            'Fill every pixel of the 16:9 canvas with the picture.',
+            ...$this->pictureIntegrityLines(),
             'Keep it PG-13: implied action, no graphic injury, no blood, no sexual content.',
             '',
             ...$this->styleLockLines($project),
@@ -785,8 +798,9 @@ class ProjectImageGenerator
                 ? 'Create a single storyboard still in the '.$look.'. One frame only.'
                 : 'Create a single cinematic storyboard still for a fictional film. One frame only.',
             'Keep it PG-13: implied action, no graphic injury, no blood, no sexual content.',
-            'No text, no watermark, no split screen, no collage.',
-            '16:9 widescreen. Level horizon. Do not distort bodies, faces, limbs, or architecture. No Dutch tilt, fisheye, or stretched perspective.',
+            '16:9 widescreen. Fill every pixel of the 16:9 canvas with the scene. Level horizon. Do not distort bodies, faces, limbs, or architecture. No Dutch tilt, fisheye, or stretched perspective.',
+            ...$this->pictureIntegrityLines(),
+            'If people are speaking, show it only in faces and mouths. Do not render spoken lines. Dialogue is not part of this picture.',
             '',
             ...$this->styleLockLines($project),
             '',
@@ -844,7 +858,6 @@ class ProjectImageGenerator
 
         foreach ([
             'Action' => $action,
-            'Dialogue' => $shot->dialogue,
             'Shot size' => $shot->shot_size,
             'Camera angle' => $shot->camera_angle,
             'Camera movement' => $shot->camera_movement,
